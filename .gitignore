@@ -1,0 +1,32 @@
+# Standalone Unreal plugin repo
+
+# Build output
+Binaries/
+Build/
+Intermediate/
+Adapter/**/bin/
+Adapter/**/obj/
+
+# IDE / local tooling
+.vs/
+.vscode/
+.dotnet/
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+*.vsconfig
+
+# Compiled / generated binaries
+*.dll
+*.pdb
+*.lib
+*.exp
+*.obj
+*.o
+
+# OS / editor noise
+Thumbs.db
+Desktop.ini
