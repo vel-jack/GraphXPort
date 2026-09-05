@@ -146,7 +146,7 @@ bool FGraphXPortExportTest::RunTest(const FString& Parameters)
     const int32 TruePath = ControlAscii.Find(TEXT("TRUE →"));
     const int32 FalsePath = ControlAscii.Find(TEXT("FALSE →"));
     TestTrue(TEXT("Control paths preserve node pin order"), TruePath != INDEX_NONE && FalsePath > TruePath);
-    TestTrue(TEXT("Connected data uses a left arrow"), ControlAscii.Contains(TEXT("Entity ← Entity")));
+    TestTrue(TEXT("Connected data includes the entry pin reference"), ControlAscii.Contains(TEXT("Entity ← [aaaaaaaa].Entity")));
     TestTrue(TEXT("Literal defaults use equals"), ControlAscii.Contains(TEXT("Selected = false")));
     TestTrue(TEXT("Converging execution emits a revisit marker"), ControlAscii.Contains(TEXT("↩ [cccccccc] Continue")));
 

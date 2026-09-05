@@ -41,17 +41,24 @@ Selection exports must include:
 - connections crossing the selection boundary
 
 The plugin is read-only until import and conflict resolution are explicitly
-implemented.
+implemented, with one narrow exception: the manual **Beautify Selection**
+command (see Safety below), which repositions the user's selected nodes and
+nothing else.
 
 ## Architecture
 
 Keep responsibilities separated:
 
-- `GraphXPortMenu` owns Unreal Editor menu integration and active selection.
+- `GraphXPortMenu` owns Unreal Editor menu integration, active selection, and
+  applying Beautify's computed positions inside an undo transaction.
 - `GraphXPortSerializer` converts Unreal graph objects into the canonical model.
 - `GraphXPortDocument` defines the canonical in-memory representation.
 - `GraphXPortFormatter` renders JSON, Markdown, ASCII, and Mermaid.
-- Tests validate deterministic export behavior and graph boundaries.
+- `GraphXPortBeautifier` computes a Beautify layout (node -> target position)
+  from live `UEdGraphNode`/`UEdGraphPin` data. It only reads graph state and
+  returns positions; it never mutates a node itself.
+- Tests validate deterministic export behavior, graph boundaries, and Beautify
+  layout correctness (linear/branch ordering, cycles, disconnected islands).
 
 Do not put serialization logic in menu callbacks or UI code.
 Do not make formatters inspect live Unreal graph objects.
@@ -93,6 +100,27 @@ editors, graphs, selections, clipboard access, or file writes.
 Export operations must not modify Blueprint assets, compile Blueprints, save
 packages, or run PIE.
 
+**Beautify Selection is the one explicit, intentional exception.** It is a
+manual, user-initiated command that repositions the nodes the user has
+selected (`NodePosX`/`NodePosY` only) to improve readability. It must stay
+within these bounds:
+
+- Position-only: never touch pins, connections, node properties, or logic.
+  (A fan-out reroute-insertion feature was implemented, live-tested, and
+  deliberately rejected/reverted - do not reintroduce node/connection mutation
+  in Beautify without this section being updated first and explicit sign-off.)
+- Selection-only: never move a node the user did not select.
+- Transactional and undoable: wrap changes in `FScopedTransaction`, call
+  `Node->Modify()` before each change, and mark the Blueprint package dirty -
+  follow normal Unreal editor edit conventions here, not the export path's
+  read-only guarantee.
+- Deterministic and safe on malformed input: cyclic or disconnected selections
+  must still terminate and produce a valid layout (see `GraphXPortBeautifier`'s
+  visited-set and depth-cap guards, mirroring the ASCII formatter's).
+- No new mutation surface without updating this section first. If a future
+  change needs to touch anything beyond node position, treat it as a new,
+  separately reviewed exception - do not fold it into Beautify silently.
+
 Future import or merge operations must be:
 
 - previewable before mutation
@@ -133,14 +161,24 @@ and edges rather than raw JSON text or node screen positions.
 
 After C++ changes:
 
-1. Build `UE_544_MCPEditor` for Win64 Development.
-2. Run `GraphXPort.Export.SelectionAndWholeGraph` automation tests.
+1. Build the host project's editor target for Win64 Development:
+   `AR_GIS_MAPEditor` in DSM, or `UE_544_MCPEditor` in the dedicated test project.
+2. Run the `GraphXPort.` automation group, including
+   `GraphXPort.Export.SelectionAndWholeGraph`, `GraphXPort.Format.Ascii.*`, and
+   `GraphXPort.Beautify.*`.
 3. Verify export output remains deterministic.
 4. For menu changes, manually verify the Blueprint node context submenu in the
-   Unreal Editor when practical.
+   Unreal Editor when practical. For Beautify changes, manually verify in a
+   live Blueprint graph that the layout is sane and that Ctrl+Z fully reverts
+   both position and package dirty state.
 
 Add focused automation coverage for serializer, formatter, boundary-link, and
 future diff/import changes.
+
+When the user prohibits running Unreal Editor, do not launch it (including
+headless automation). Compile-only verification may use `-NoLink -NoHotReload
+-NoHotReloadFromIDE`; report automation tests and the linked DLL as unverified
+until a normal build/test run is permitted.
 
 ## Repository Hygiene
 
@@ -152,4 +190,3 @@ Do not commit plugin-local generated output such as:
 - `Intermediate/`
 - `Saved/`
 - IDE-generated files
-

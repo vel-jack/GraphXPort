@@ -8,12 +8,14 @@
 #include "Engine/Blueprint.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Framework/Notifications/NotificationManager.h"
+#include "GraphXPortBeautifier.h"
 #include "GraphXPortSerializer.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "IDesktopPlatform.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
-#include "Subsystems/AssetEditorSubsystem.h"
+#include "ScopedTransaction.h"
 #include "ToolMenu.h"
 #include "ToolMenuSection.h"
 #include "ToolMenus.h"
@@ -38,16 +40,23 @@ namespace
         const UEdGraphNode* ClickedNode)
     {
         TArray<const UEdGraphNode*> Result;
-        if (Blueprint != nullptr && GEditor != nullptr)
+        if (Blueprint != nullptr)
         {
-            UAssetEditorSubsystem* AssetEditors = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
-            IAssetEditorInstance* EditorInstance = AssetEditors != nullptr
-                ? AssetEditors->FindEditorForAsset(const_cast<UBlueprint*>(Blueprint), false)
-                : nullptr;
-            if (EditorInstance != nullptr && EditorInstance->GetEditorName() == TEXT("BlueprintEditor"))
+            // FKismetEditorUtilities::GetIBlueprintEditorForObject is the engine's own
+            // blessed lookup for "the editor currently open on this Blueprint" - it replaces
+            // the previous AssetEditorSubsystem::FindEditorForAsset() call and its unchecked
+            // static_cast<const FBlueprintEditor*> gated by a GetEditorName() == "BlueprintEditor"
+            // string comparison, which silently produced an empty selection for any editor
+            // other than the exact base Blueprint editor (e.g. Widget/Anim Blueprint editors).
+            // IBlueprintEditor itself intentionally does not expose the full node selection
+            // set (only AddToSelection/GetNumberOfSelectedNodes), and every current
+            // implementer of it for a Blueprint asset derives from FBlueprintEditor, so the
+            // cast below is type-safe in practice even though the interface has no RTTI.
+            const TSharedPtr<IBlueprintEditor> Editor = FKismetEditorUtilities::GetIBlueprintEditorForObject(Blueprint, false);
+            if (Editor.IsValid())
             {
-                const FBlueprintEditor* BlueprintEditor = static_cast<const FBlueprintEditor*>(EditorInstance);
-                const FGraphPanelSelectionSet SelectedObjects = BlueprintEditor->GetSelectedNodes();
+                const TSharedPtr<FBlueprintEditor> ConcreteEditor = StaticCastSharedPtr<FBlueprintEditor>(Editor);
+                const FGraphPanelSelectionSet SelectedObjects = ConcreteEditor->GetSelectedNodes();
                 for (UObject* SelectedObject : SelectedObjects)
                 {
                     const UEdGraphNode* SelectedNode = Cast<UEdGraphNode>(SelectedObject);
@@ -70,6 +79,49 @@ namespace
     FString SafeFileBase(const FGraphXPortDocument& Document)
     {
         return FPaths::MakeValidFileName(Document.BlueprintName + TEXT("_") + Document.GraphName + TEXT("_") + Document.Scope);
+    }
+
+    bool NodeHasExecPin(const UEdGraphNode* Node)
+    {
+        for (const UEdGraphPin* Pin : Node->Pins)
+            if (Pin != nullptr && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec) return true;
+        return false;
+    }
+
+    // A single selected node can't be "arranged" against nothing, so Beautify treats that
+    // as "format everything downstream of this node" instead of requiring a manual
+    // multi-select: walk forward through the node's own execution chain (every branch,
+    // not just one path), and at every node visited also walk backward through its data
+    // input pins so pure/data sources feeding the chain come along too. This never leaves
+    // the node's own downstream chain and never crosses into an unrelated part of the
+    // graph a data output happens to also feed.
+    TArray<UEdGraphNode*> ExpandFromSingleNode(UEdGraphNode* Start)
+    {
+        TArray<UEdGraphNode*> Result;
+        TSet<UEdGraphNode*> Visited{Start};
+        TArray<UEdGraphNode*> Queue{Start};
+        while (!Queue.IsEmpty())
+        {
+            UEdGraphNode* Node = Queue.Pop();
+            Result.Add(Node);
+            for (UEdGraphPin* Pin : Node->Pins)
+            {
+                if (Pin == nullptr) continue;
+                const bool bExec = Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Exec;
+                const bool bFollow = (bExec && Pin->Direction == EGPD_Output) || (!bExec && Pin->Direction == EGPD_Input);
+                if (!bFollow) continue;
+                for (UEdGraphPin* Linked : Pin->LinkedTo)
+                {
+                    UEdGraphNode* Other = Linked != nullptr ? Linked->GetOwningNode() : nullptr;
+                    if (Other != nullptr && !Visited.Contains(Other))
+                    {
+                        Visited.Add(Other);
+                        Queue.Add(Other);
+                    }
+                }
+            }
+        }
+        return Result;
     }
 }
 
@@ -123,6 +175,11 @@ void FGraphXPortMenu::PopulateSubmenu(UToolMenu* Menu)
     AddAction(TEXT("CopyMermaid"), LOCTEXT("CopyMermaid", "Copy Selection as Mermaid"),
         LOCTEXT("CopyMermaidTip", "Copy a Mermaid flowchart generated from the selected nodes."),
         EGraphXPortFormat::Mermaid, false, false);
+    Section.AddMenuEntry(TEXT("BeautifySelection"),
+        LOCTEXT("BeautifySelection", "Beautify Selection"),
+        LOCTEXT("BeautifySelectionTip", "Rearrange the selected nodes left-to-right by execution flow, anchored on the node you right-clicked. Select one node to format its whole downstream chain, or select several to arrange just those. Undoable; does not change pins or connections."),
+        FSlateIcon(), FUIAction(FExecuteAction::CreateLambda(
+            [Blueprint, Graph, Node]() { Beautify(Blueprint.Get(), Graph.Get(), Node.Get()); })));
 
     Section.AddSeparator(TEXT("GraphScopeSeparator"));
     AddAction(TEXT("CopyGraphAiText"), LOCTEXT("CopyGraphAiText", "Copy Entire Graph for AI"),
@@ -191,6 +248,76 @@ void FGraphXPortMenu::Export(
         return;
     }
     Notify(FText::FromString(TEXT("GraphXPort exported: ") + OutputFiles[0]), SNotificationItem::CS_Success);
+}
+
+void FGraphXPortMenu::Beautify(const UBlueprint* Blueprint, const UEdGraph* Graph, const UEdGraphNode* ClickedNode)
+{
+    if (Blueprint == nullptr || Graph == nullptr)
+    {
+        Notify(LOCTEXT("ContextExpired", "GraphXPort export context is no longer available."), SNotificationItem::CS_Fail);
+        return;
+    }
+
+    TArray<UEdGraphNode*> SelectedNodes;
+    for (const UEdGraphNode* Node : ResolveSelection(Blueprint, Graph, ClickedNode))
+    {
+        SelectedNodes.Add(const_cast<UEdGraphNode*>(Node));
+    }
+
+    // Two supported workflows share this one menu entry: a manual multi-select is
+    // beautified exactly as selected (nothing outside it is touched, and the layout never
+    // follows a connection past the last selected node); selecting a single node instead
+    // expands to that node's own downstream execution chain so "format everything from
+    // here to the end" doesn't require manually selecting the whole chain first.
+    if (SelectedNodes.Num() == 1 && NodeHasExecPin(SelectedNodes[0]))
+    {
+        SelectedNodes = ExpandFromSingleNode(SelectedNodes[0]);
+    }
+
+    // The clicked node anchors the whole layout at its own current position - it is the
+    // "first node" everything else is arranged relative to, whether that's the one node
+    // the user selected (single-node case) or whichever node they right-clicked within a
+    // larger multi-selection.
+    UEdGraphNode* PreferredAnchor = const_cast<UEdGraphNode*>(ClickedNode);
+
+    TMap<UEdGraphNode*, FVector2D> Positions;
+    if (SelectedNodes.Num() < 2 || !FGraphXPortBeautifier::ComputeLayout(SelectedNodes, Positions, PreferredAnchor))
+    {
+        Notify(LOCTEXT("BeautifyNeedsTwo", "GraphXPort: select at least two nodes to beautify."), SNotificationItem::CS_Fail);
+        return;
+    }
+
+    TArray<TPair<UEdGraphNode*, FIntPoint>> Changes;
+    for (const TPair<UEdGraphNode*, FVector2D>& Pair : Positions)
+    {
+        UEdGraphNode* Node = Pair.Key;
+        const int32 NewX = FMath::RoundToInt(Pair.Value.X);
+        const int32 NewY = FMath::RoundToInt(Pair.Value.Y);
+        if (Node->NodePosX != NewX || Node->NodePosY != NewY)
+        {
+            Changes.Add({Node, FIntPoint(NewX, NewY)});
+        }
+    }
+    if (Changes.IsEmpty())
+    {
+        Notify(LOCTEXT("BeautifyNoChange", "GraphXPort: selection is already arranged."), SNotificationItem::CS_Success);
+        return;
+    }
+
+    // Beautify is the plugin's one intentional exception to "export never mutates": it is
+    // a cosmetic, position-only edit to the user's own selection, so it follows normal
+    // Unreal editor edit conventions (transaction + Modify() + dirty) rather than the
+    // export path's read-only guarantee.
+    const FScopedTransaction Transaction(LOCTEXT("BeautifyTransaction", "Beautify GraphXPort Selection"));
+    for (const TPair<UEdGraphNode*, FIntPoint>& Change : Changes)
+    {
+        Change.Key->Modify();
+        Change.Key->NodePosX = Change.Value.X;
+        Change.Key->NodePosY = Change.Value.Y;
+    }
+    const_cast<UBlueprint*>(Blueprint)->MarkPackageDirty();
+    Notify(FText::Format(LOCTEXT("Beautified", "GraphXPort rearranged {0} node(s)."), FText::AsNumber(Changes.Num())),
+        SNotificationItem::CS_Success);
 }
 
 #undef LOCTEXT_NAMESPACE
