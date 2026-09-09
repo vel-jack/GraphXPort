@@ -1,9 +1,9 @@
 {
   "FileVersion": 3,
-  "Version": 1,
-  "VersionName": "0.1.0",
+  "Version": 2,
+  "VersionName": "0.2.0",
   "FriendlyName": "GraphXPort",
-  "Description": "Exports Blueprint graph selections and complete graphs to portable AI text, JSON, ASCII, and Mermaid formats.",
+  "Description": "Exports Blueprint graph selections and complete graphs to portable AI text, JSON, ASCII, and Mermaid formats, and resolves Blueprint git conflicts side by side in the GraphXPort Merge window.",
   "Category": "Blueprints",
   "CreatedBy": "vel-jack",
   "CreatedByURL": "https://github.com/vel-jack",
@@ -15,6 +15,11 @@
   "Modules": [
     {
       "Name": "GraphXPort",
+      "Type": "Editor",
+      "LoadingPhase": "PostEngineInit"
+    },
+    {
+      "Name": "GraphXPortMerge",
       "Type": "Editor",
       "LoadingPhase": "PostEngineInit"
     }

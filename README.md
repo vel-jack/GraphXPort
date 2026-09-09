@@ -38,6 +38,28 @@ for example `[12345678] Compute(First=1, Second=2).Result`. Impure call outputs 
 references such as `[abcdef12].Result`, not additional invocations. External IDs
 participate in short-ID collision detection, including links through reroutes.
 
+## GraphXPort Merge
+
+**Tools → GraphXPort Merge** opens a window for reviewing and
+resolving Blueprint changes against git. It requires git on `PATH` and the
+project to be inside a working tree; otherwise it says so instead of opening.
+
+The window lists unstaged changes (`M`, `A`, `D`, `R`, `?`, and `U` for
+conflicts) and shows the selected file's Blueprint revisions side by side in real
+Unreal graph editors: Base / Mine / Theirs for a conflict, HEAD / Working for an
+ordinary edit. Changed nodes are highlighted by the engine's own diff rendering.
+
+A differences tree lists every change - graph nodes, variables, class defaults,
+and components - and clicking one jumps the panes to it. Selecting a non-graph
+difference swaps the panes to a member list with a Details panel, so a changed
+tooltip, tag, or default value is visible rather than just named.
+
+Only the **Mine** pane is editable. You merge by hand: select nodes in any pane,
+copy, and paste into Mine, then edit or delete as needed. **Save & Mark Resolved**
+compiles the result, saves it, and stages the file so git records the conflict as
+resolved; it refuses if the Blueprint does not compile. Committing, and taking
+one side wholesale, stay in your own git tool.
+
 ## Verification
 
 The `GraphXPort.` automation group contains the selection/whole-graph checks,
@@ -57,7 +79,7 @@ Canonical format version 1 includes `nodePinOrder` on pins so renderers and futu
 
 ## Scope
 
-Export is read-only. Beautify is the sole exception, and only ever changes node
-position within the user's own selection. Snapshot comparison, structural
-conflict reporting, and transactional import from a `.graphx.json` snapshot are
-planned on top of the canonical JSON model.
+Export is read-only. Two features intentionally write: **Beautify**, which only
+ever changes node position within your own selection, and **GraphXPort Merge**,
+which saves the working-tree asset you edited and stages it. Historical revisions
+shown for comparison are always read-only and are never written back.
