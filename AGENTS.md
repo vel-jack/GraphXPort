@@ -29,8 +29,8 @@ The plugin ships two editor modules:
 - `GraphXPort` - export, formatting, and Beautify. Has no git dependency and works
   entirely offline, as described below.
 - `GraphXPortMerge` - the **GraphXPort Merge** window: git status, side-by-side
-  Blueprint revision comparison, and conflict resolution. It shells out to `git`,
-  which is the one place the plugin invokes an external process.
+  asset revision comparison, and manual conflict resolution. It shells out to
+  `git`, which is the one place the plugin invokes an external process.
 
 `GraphXPortMerge` may depend on `GraphXPort`; never the reverse. Nothing in
 `GraphXPort` may require git to be installed.
@@ -83,18 +83,35 @@ Keep responsibilities separated:
   Keep parsing in `ParseStatusOutput`, separate from process execution, so it
   stays testable.
 - `GraphXPortGitBlob` extracts a revision's bytes for a path.
-- `GraphXPortTempPackage` loads a revision as a Blueprint using the engine's own
+- `GraphXPortTempPackage` loads a revision using the engine's own
   `DiffUtils::LoadPackageForDiff`. Use that helper rather than a hand-rolled
   `LoadPackage`: it loads from a loose file with
   `LOAD_ForDiff | LOAD_DisableCompileOnLoad | LOAD_DisableEngineVersionChecks`,
   so an old revision never compiles on load, and it needs no mount point, so
-  revisions never appear in the Content Browser.
+  revisions never appear in the Content Browser. It also classifies what a
+  package holds, and for a `.umap` it reports the world as the asset and the
+  level script Blueprint as the graph source (never creating one on a historical
+  revision).
+- `GraphXPortAssetDiff` handles assets that have no graphs - user-defined enums,
+  structs, and data tables - by projecting them into a list of keyed entries with
+  columns, so one comparison and one grid renderer cover all three.
 - `SGraphXPortMergeWindow` owns the file list; `SGraphXPortDiffPanel` owns the
   revision panes, the differences tree, and resolution.
 
 Do not put serialization logic in menu callbacks or UI code.
 Do not make formatters inspect live Unreal graph objects.
 Do not add a second place that launches git.
+
+Two traps in `SGraphXPortDiffPanel` that cost real debugging time:
+
+- **Keep each pane's `FUICommandList` alive in a member.** `SGraphEditor::Construct`
+  appends it but stores only a `TWeakPtr`, so a command list built as a local
+  variable dies the moment the function returns and every binding silently stops
+  working - copy, paste and delete all at once.
+- **Focus a node on the next tick, not in the same frame as `RebuildPanes()`.**
+  A freshly constructed `SGraphEditor` has no geometry yet, so `JumpToNode`
+  centres against nothing and appears to do nothing. `RequestJumpToNode` defers
+  through an active timer.
 
 ## Canonical Format
 
@@ -158,11 +175,18 @@ within these bounds:
 merge window edits and saves the real working-tree asset and stages it with git.
 It must stay within these bounds:
 
-- Only the "Mine" pane is editable, and it is always the real, live `/Game`
-  asset. Base and Theirs are diff-only revisions and must stay read-only.
+- The window shows three panes: a left reference that toggles between **Base** and
+  **Mine**, an editable **Result**, and **Theirs**. Only Result is editable, and it
+  is always the real, live `/Game` asset - the only thing ever saved. Base, Mine
+  and Theirs are diff-only revisions and must stay read-only.
   Read-only is enforced three ways, and all three are required: `IsEditable(false)`,
   `DisplayAsReadOnly(true)`, and clearing the graph's own `UEdGraph::bEditable`.
   The widget attribute alone does not gate pin and connection editing.
+- Do not conflate "Mine" with "the thing being edited". Mine is git stage 2 and is
+  read-only; Result is the working tree. Outside a conflict there are no git stages
+  at all, so comparisons must go through `LocalChangeSide()` - stage 2 in a
+  conflict, the working tree otherwise. Reading `MineSide` directly silently
+  reports zero changes for an ordinary modified file.
 - Clearing `bEditable` is only ever done on diff-only revisions, which are never
   saved. Never clear it on the real asset's graph.
 - Diff-only revisions are never force-unloaded. Hold them alive from an
@@ -171,14 +195,23 @@ It must stay within these bounds:
   as `TObjectPtr`, not raw pointers - the raw-pointer `AddReferencedObject`
   overload is documented to crash under incremental GC.
 - The merge window never overwrites the working-tree file with a revision's
-  bytes. "Accept current/incoming" was implemented and deliberately removed:
-  wholesale side-taking belongs in the user's git tool, and overwriting a loaded
+  bytes. Two features that did were implemented and deliberately removed:
+  "Accept current/incoming", and "Start from Mine / Start from Incoming" seeding.
+  Wholesale side-taking belongs in the user's git tool, and overwriting a loaded
   `.uasset` on disk fails anyway while the editor holds the file open. Do not
-  reintroduce it without this section being updated first and explicit sign-off.
-- Resolution is: the user edits Mine with ordinary graph editing, then
-  **Save & Mark Resolved** compiles, saves, and runs `git add`. A failed compile
-  must abort the whole action - never stage a Blueprint that does not compile,
-  because a conflict marked resolved stops being looked at.
+  reintroduce either without this section being updated first and explicit sign-off.
+- Resolution is: the user edits Result with ordinary graph editing - copying nodes
+  from any read-only pane and pasting into Result - then **Save & Mark Resolved**
+  compiles, saves, and runs `git add`. A failed compile must abort the whole action
+  - never stage a Blueprint that does not compile, because a conflict marked
+  resolved stops being looked at.
+- Copy is bound on every pane; paste and delete only on Result.
+- Closing the tab purges loaded revisions: tear down the panes and drop every
+  reference first, then collect garbage, then delete the temp files. That order
+  matters - linkers must close before the loose files can be deleted, and
+  collecting while a pane still points at a revision's graph crashes the editor.
+  The purge exists because revisions are real assets while loaded, so their
+  classes and structs otherwise appear in class/struct pickers.
 - Staging is the only git write. Never commit, push, checkout, reset, or
   otherwise move the user's branch state from inside the editor.
 - Only unstaged worktree entries are listed, deliberately. Staged files are the
@@ -206,23 +239,42 @@ rendering and editing rather than a reimplementation.
 
 Current behaviour:
 
-- Conflicts (`U`) show Base / Mine / Theirs; unstaged edits (`M`, `R`) show
-  HEAD / Working.
+- Conflicts (`U`) show Base/Mine (toggle) / Result / Theirs; unstaged edits
+  (`M`, `R`) show HEAD / Working tree.
 - Node-level differences come from `FGraphDiffControl::DiffGraphs`, and each side
   is diffed against the common ancestor so a pane shows what *that* side changed.
   Results are handed to `SGraphEditor`'s own `DiffResults` argument, so
   highlighting is engine-rendered.
-- Non-graph differences are surfaced too, because a conflict often lives outside
+- Non-graph differences are surfaced too, because a change often lives outside
   the graphs: variables (added/removed/retyped/default changed), class defaults
   and component templates (via `DiffUtils::CompareUnrelatedObjects`), components
   (added/removed/class changed), and graphs present on only one side.
 - Selecting a non-graph difference swaps the panes to a member list plus a real
   `IDetailsView` of the relevant component or the class defaults, so changed
   values are visible rather than merely named.
-- Merging is done by hand: copy nodes from any pane, paste into Mine only.
+- Enums, structs and data tables have no graphs and render as a column grid with
+  per-cell change highlighting.
+- The tree lists **Mine Changes** and **Theirs Changes** only. Selecting a row
+  focuses every pane on that node, each resolving it by `NodeGuid` in its own
+  revision.
+- Merging is done by hand: copy nodes from any pane, paste into Result only.
 
 Diffs compare semantic graph identity, node properties, pin defaults, and edges
 rather than raw JSON text or node screen positions.
+
+**There is deliberately no automatic conflict detection.** It was built twice and
+removed twice. First by matching `FDiffSingleResult::DisplayString`, which is
+unreliable because two incompatible changes can produce identical text - both
+sides wiring a different node onto the same pin each read "Added Link to 'then'"
+and so compared as agreement. Then as a proper three-way comparison of projected
+graph state, which was correct in principle but produced false positives the user
+judged not worth the noise: diff-only revisions load into per-revision temp
+packages, so `PinSubCategoryObject` paths differ between sides and identical pins
+compare as changed.
+
+Do not reintroduce conflict analysis, Previous/Next Conflict navigation, or a
+Conflicts section without explicit sign-off. The user's stated preference is to
+see both sides' changes and decide by hand.
 
 The canonical `.graphx.json` model is still the export format, and is not used by
 the merge path.
@@ -252,10 +304,18 @@ After C++ changes:
    live Blueprint graph that the layout is sane and that Ctrl+Z fully reverts
    both position and package dirty state.
 5. For merge-window changes, manually verify against a real conflicted asset:
-   Base/Theirs render and stay non-editable (including pin connections), copy
-   from a read-only pane pastes into Mine, and no console window appears for any
-   git call. Much of this module cannot be covered by automation because it needs
-   a real repository in a conflicted state.
+   the read-only panes stay non-editable (including pin connections), copy from a
+   read-only pane pastes into Result, selecting a row focuses all panes, and no
+   console window appears for any git call. Also check an ordinary modified file,
+   which takes a different path through `LocalChangeSide()`. Much of this module
+   cannot be covered by automation because it needs a real repository in a
+   conflicted state.
+
+**Confirm a build actually linked.** With Live Coding active, UBT prints
+"Unable to build while Live Coding is active", performs zero link actions,
+finishes in about two seconds and still reports success - leaving a stale DLL
+that makes deleted code appear to still run. Look for a `Link [x64] ...dll` line,
+not just "Total execution time".
 
 Add focused automation coverage for serializer, formatter, boundary-link, and
 future diff/import changes.

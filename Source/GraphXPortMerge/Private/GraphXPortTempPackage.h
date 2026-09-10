@@ -1,21 +1,26 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GraphXPortAssetDiff.h"
 
 class UBlueprint;
 class UPackage;
 
-/** Result of loading a historical git revision as an isolated, diff-only Blueprint. */
-struct FGraphXPortLoadedBlueprint
+/** A revision of an asset, loaded and classified. */
+struct FGraphXPortLoadedAsset
 {
+    /** The asset itself: the Blueprint, enum, struct, data table, or - for a level - the world. */
+    UObject* Asset = nullptr;
+    /** Set for Blueprint and LevelScript kinds; the graphs to compare live here. */
     UBlueprint* Blueprint = nullptr;
     UPackage* Package = nullptr;
+    EGraphXPortAssetKind Kind = EGraphXPortAssetKind::None;
 
-    bool IsValid() const { return Blueprint != nullptr; }
+    bool IsValid() const { return Asset != nullptr; }
 };
 
 /**
- * Loads alternate revisions of a Blueprint (extracted from git) as diff-only packages,
+ * Loads alternate revisions of an asset (extracted from git) as diff-only packages,
  * using the engine's own DiffUtils::LoadPackageForDiff - the same path the editor's
  * "Diff Against Depot" uses. That matters for more than convenience: it loads from a
  * loose file with LOAD_ForDiff | LOAD_DisableCompileOnLoad | LOAD_DisableEngineVersionChecks,
@@ -32,10 +37,21 @@ public:
     /** Removes temp revision files left behind by previous sessions. */
     static void CleanStaleTempFiles();
 
-    /** Extracts <RefSpec>:<RepoRelativePath> from git and loads it as a diff-only Blueprint. */
-    static bool LoadBlobAsBlueprint(const FString& RepoRoot, const FString& RefSpec, const FString& RepoRelativePath, FGraphXPortLoadedBlueprint& OutResult, FString& OutError);
+    /**
+     * Collects the loaded revisions and deletes their files. Callers MUST have dropped
+     * every reference first (panes torn down, sides cleared) - this collects garbage
+     * synchronously, so anything still pointing at a revision would be left dangling.
+     *
+     * Needed because diff revisions are real assets while loaded: their classes and
+     * structs show up in class/struct pickers, so a session that reviews several files
+     * would otherwise offer the user duplicate entries.
+     */
+    static void PurgeLoadedRevisions();
 
-    /** Resolves RepoRelativePath to the real, live /Game Blueprint - used for the editable
+    /** Extracts <RefSpec>:<RepoRelativePath> from git and loads it as a diff-only revision. */
+    static bool LoadBlobAsAsset(const FString& RepoRoot, const FString& RefSpec, const FString& RepoRelativePath, FGraphXPortLoadedAsset& OutResult, FString& OutError);
+
+    /** Resolves RepoRelativePath to the real, live /Game asset - used for the editable
      *  "Mine" side, which is never a diff-only copy. */
-    static bool ResolveRealBlueprint(const FString& RepoRoot, const FString& RepoRelativePath, UBlueprint*& OutBlueprint, FString& OutError);
+    static bool ResolveRealAsset(const FString& RepoRoot, const FString& RepoRelativePath, FGraphXPortLoadedAsset& OutResult, FString& OutError);
 };

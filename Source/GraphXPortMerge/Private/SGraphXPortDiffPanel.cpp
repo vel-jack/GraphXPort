@@ -11,13 +11,17 @@
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "GraphDiffControl.h"
 #include "GraphEditor.h"
+#include "GraphXPortGitBlob.h"
 #include "GraphXPortTempPackage.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "IDetailsView.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/MessageDialog.h"
 #include "Misc/PackageName.h"
+#include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
+#include "PackageTools.h"
 #include "PropertyEditorModule.h"
 #include "ScopedTransaction.h"
 #include "Styling/AppStyle.h"
@@ -25,6 +29,7 @@
 #include "UObject/SavePackage.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/Layout/SGridPanel.h"
 #include "Widgets/Layout/SScrollBox.h"
 #include "Widgets/Layout/SSplitter.h"
 #include "Widgets/Text/STextBlock.h"
@@ -38,6 +43,7 @@ namespace GraphXPortDiffPanelPrivate
     static const FLinearColor RemovedColor(0.95f, 0.35f, 0.3f);
     static const FLinearColor ChangedColor(0.9f, 0.75f, 0.25f);
     static const FLinearColor UnchangedColor(0.75f, 0.75f, 0.75f);
+    static const FLinearColor ConflictColor(1.f, 0.42f, 0.15f);
 
     static TMap<FName, USCS_Node*> GatherComponentNodes(const UBlueprint* Blueprint)
     {
@@ -102,12 +108,12 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::GetDifferencesTree() const
 
 void SGraphXPortDiffPanel::AddReferencedObjects(FReferenceCollector& Collector)
 {
-    Collector.AddReferencedObject(BaseSide.Blueprint);
-    Collector.AddReferencedObject(BaseSide.Package);
-    Collector.AddReferencedObject(MineSide.Blueprint);
-    Collector.AddReferencedObject(MineSide.Package);
-    Collector.AddReferencedObject(TheirsSide.Blueprint);
-    Collector.AddReferencedObject(TheirsSide.Package);
+    for (FSideData* Side : { &BaseSide, &MineSide, &TheirsSide, &ResultSide })
+    {
+        Collector.AddReferencedObject(Side->Asset);
+        Collector.AddReferencedObject(Side->Blueprint);
+        Collector.AddReferencedObject(Side->Package);
+    }
 }
 
 void SGraphXPortDiffPanel::SetFile(const FString& InRepoRoot, TSharedPtr<FGraphXPortGitFileEntry> InEntry)
@@ -138,11 +144,11 @@ void SGraphXPortDiffPanel::ReleaseLoadedRevisions()
     {
         PanesContainer->SetContent(SNullWidget::NullWidget);
     }
-    BasePane.Reset();
-    MinePane.Reset();
+    LeftPane.Reset();
+    ResultPane.Reset();
     TheirsPane.Reset();
-    BasePaneCommands.Reset();
-    MinePaneCommands.Reset();
+    LeftPaneCommands.Reset();
+    ResultPaneCommands.Reset();
     TheirsPaneCommands.Reset();
 
     // Diff results and tree rows hold raw node pointers into those revisions.
@@ -161,17 +167,24 @@ void SGraphXPortDiffPanel::ReleaseLoadedRevisions()
     BaseSide = FSideData();
     MineSide = FSideData();
     TheirsSide = FSideData();
+    ResultSide = FSideData();
+    bLeftShowsMine = false;
 }
 
 void SGraphXPortDiffPanel::LoadTempSide(FSideData& Side, const FString& RefSpec)
 {
-    FGraphXPortLoadedBlueprint Loaded;
+    FGraphXPortLoadedAsset Loaded;
     FString Error;
-    if (FGraphXPortTempPackage::LoadBlobAsBlueprint(RepoRoot, RefSpec, Entry->RepoRelativePath, Loaded, Error))
+    if (FGraphXPortTempPackage::LoadBlobAsAsset(RepoRoot, RefSpec, Entry->RepoRelativePath, Loaded, Error))
     {
+        Side.Asset = Loaded.Asset;
         Side.Blueprint = Loaded.Blueprint;
         Side.Package = Loaded.Package;
+        Side.Kind = Loaded.Kind;
         Side.bIsTemp = true;
+        Side.UnavailableReason = Error;
+        FGraphXPortAssetDiff::GetEntries(Loaded.Asset, Side.Entries);
+        FGraphXPortAssetDiff::GetColumns(Loaded.Asset, Side.Columns);
     }
     else
     {
@@ -181,13 +194,18 @@ void SGraphXPortDiffPanel::LoadTempSide(FSideData& Side, const FString& RefSpec)
 
 void SGraphXPortDiffPanel::LoadRealSide(FSideData& Side, bool bEditable)
 {
-    UBlueprint* Blueprint = nullptr;
+    FGraphXPortLoadedAsset Loaded;
     FString Error;
-    if (FGraphXPortTempPackage::ResolveRealBlueprint(RepoRoot, Entry->RepoRelativePath, Blueprint, Error))
+    if (FGraphXPortTempPackage::ResolveRealAsset(RepoRoot, Entry->RepoRelativePath, Loaded, Error))
     {
-        Side.Blueprint = Blueprint;
-        Side.Package = Blueprint->GetOutermost();
+        Side.Asset = Loaded.Asset;
+        Side.Blueprint = Loaded.Blueprint;
+        Side.Package = Loaded.Package;
+        Side.Kind = Loaded.Kind;
         Side.bEditable = bEditable;
+        Side.UnavailableReason = Error;
+        FGraphXPortAssetDiff::GetEntries(Loaded.Asset, Side.Entries);
+        FGraphXPortAssetDiff::GetColumns(Loaded.Asset, Side.Columns);
     }
     else
     {
@@ -200,6 +218,7 @@ void SGraphXPortDiffPanel::RebuildSides()
     BaseSide = FSideData();
     MineSide = FSideData();
     TheirsSide = FSideData();
+    ResultSide = FSideData();
 
     if (!Entry.IsValid())
     {
@@ -213,10 +232,12 @@ void SGraphXPortDiffPanel::RebuildSides()
         Mode = EGraphXPortDiffMode::Conflict3Way;
         BaseSide.Label = LOCTEXT("Base", "Base (common ancestor)");
         LoadTempSide(BaseSide, TEXT(":1"));
+        MineSide.Label = LOCTEXT("Mine", "Mine (yours)");
+        LoadTempSide(MineSide, TEXT(":2"));
         TheirsSide.Label = LOCTEXT("Theirs", "Theirs (incoming)");
         LoadTempSide(TheirsSide, TEXT(":3"));
-        MineSide.Label = LOCTEXT("Mine", "Mine (editable)");
-        LoadRealSide(MineSide, /*bEditable=*/true);
+        ResultSide.Label = LOCTEXT("Result", "Result (editable)");
+        LoadRealSide(ResultSide, /*bEditable=*/true);
         break;
 
     case TEXT('M'):
@@ -224,8 +245,8 @@ void SGraphXPortDiffPanel::RebuildSides()
         Mode = EGraphXPortDiffMode::ModifiedCompare;
         BaseSide.Label = LOCTEXT("Head", "HEAD");
         LoadTempSide(BaseSide, TEXT("HEAD"));
-        MineSide.Label = LOCTEXT("Working", "Working tree (editable)");
-        LoadRealSide(MineSide, /*bEditable=*/true);
+        ResultSide.Label = LOCTEXT("Working", "Working tree (editable)");
+        LoadRealSide(ResultSide, /*bEditable=*/true);
         break;
 
     case TEXT('D'):
@@ -238,8 +259,8 @@ void SGraphXPortDiffPanel::RebuildSides()
     case TEXT('?'):
     default:
         Mode = EGraphXPortDiffMode::NewFile;
-        MineSide.Label = LOCTEXT("New", "New file (editable)");
-        LoadRealSide(MineSide, /*bEditable=*/true);
+        ResultSide.Label = LOCTEXT("New", "New file (editable)");
+        LoadRealSide(ResultSide, /*bEditable=*/true);
         break;
     }
 }
@@ -247,7 +268,7 @@ void SGraphXPortDiffPanel::RebuildSides()
 void SGraphXPortDiffPanel::CollectGraphNames()
 {
     TSet<FName> Names;
-    for (const FSideData* Side : { &BaseSide, &MineSide, &TheirsSide })
+    for (const FSideData* Side : { &BaseSide, &MineSide, &TheirsSide, &ResultSide })
     {
         if (Side->Blueprint)
         {
@@ -301,6 +322,30 @@ UEdGraph* SGraphXPortDiffPanel::FindGraphForSide(const FSideData& Side, FName Gr
     return nullptr;
 }
 
+UEdGraphNode* SGraphXPortDiffPanel::FindNodeForSide(const FSideData& Side, FName GraphName, const FGuid& NodeGuid) const
+{
+    if (!NodeGuid.IsValid())
+    {
+        return nullptr;
+    }
+
+    UEdGraph* Graph = FindGraphForSide(Side, GraphName);
+    if (!Graph)
+    {
+        return nullptr;
+    }
+
+    for (UEdGraphNode* Node : Graph->Nodes)
+    {
+        if (Node && Node->NodeGuid == NodeGuid)
+        {
+            return Node;
+        }
+    }
+
+    return nullptr;
+}
+
 void SGraphXPortDiffPanel::ComputeAllDiffs()
 {
     GraphDiffs.Reset();
@@ -310,11 +355,13 @@ void SGraphXPortDiffPanel::ComputeAllDiffs()
         FGraphDiffSet Set;
         Set.MineDiffs = MakeShared<TArray<FDiffSingleResult>>();
         Set.TheirsDiffs = MakeShared<TArray<FDiffSingleResult>>();
+        Set.ResultDiffs = MakeShared<TArray<FDiffSingleResult>>();
         Set.BaseDiffs = MakeShared<TArray<FDiffSingleResult>>();
 
         UEdGraph* BaseGraph = FindGraphForSide(BaseSide, GraphName);
         UEdGraph* MineGraph = FindGraphForSide(MineSide, GraphName);
         UEdGraph* TheirsGraph = FindGraphForSide(TheirsSide, GraphName);
+        UEdGraph* ResultGraph = FindGraphForSide(ResultSide, GraphName);
 
         // Each side is diffed against the common ancestor, so every pane shows what that
         // side changed rather than a single combined mine-vs-theirs delta.
@@ -326,10 +373,21 @@ void SGraphXPortDiffPanel::ComputeAllDiffs()
         {
             FGraphDiffControl::DiffGraphs(BaseGraph, TheirsGraph, *Set.TheirsDiffs);
         }
-
+        if (BaseGraph && ResultGraph)
+        {
+            FGraphDiffControl::DiffGraphs(BaseGraph, ResultGraph, *Set.ResultDiffs);
+        }
         // The base pane marks anything either side touched.
-        Set.BaseDiffs->Append(*Set.MineDiffs);
-        Set.BaseDiffs->Append(*Set.TheirsDiffs);
+        if (Mode == EGraphXPortDiffMode::Conflict3Way)
+        {
+            Set.BaseDiffs->Append(*Set.MineDiffs);
+            Set.BaseDiffs->Append(*Set.TheirsDiffs);
+        }
+        else
+        {
+            // The HEAD pane highlights what the working tree changed.
+            Set.BaseDiffs->Append(*Set.ResultDiffs);
+        }
 
         GraphDiffs.Add(GraphName, Set);
     }
@@ -344,7 +402,7 @@ void SGraphXPortDiffPanel::AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiff
         return;
     }
 
-    auto CompareVariables = [&OutRows](const UBlueprint* Base, const UBlueprint* Side, const FText& SideTag)
+    auto CompareVariables = [&OutRows](const UBlueprint* Base, const UBlueprint* Side, const FText& SideTag, bool bFromTheirs)
     {
         if (!Base || !Side)
         {
@@ -379,6 +437,7 @@ void SGraphXPortDiffPanel::AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiff
             if (Row.IsValid())
             {
                 Row->bIsMemberRow = true;
+                Row->bFromTheirs = bFromTheirs;
                 OutRows.Add(Row);
             }
         }
@@ -394,6 +453,7 @@ void SGraphXPortDiffPanel::AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiff
                 Row->Label = FText::Format(LOCTEXT("VarRemoved", "{0}: Removed variable '{1}'"), SideTag, FText::FromName(BaseVar.VarName));
                 Row->Color = RemovedColor;
                 Row->bIsMemberRow = true;
+                Row->bFromTheirs = bFromTheirs;
                 OutRows.Add(Row);
             }
         }
@@ -403,8 +463,8 @@ void SGraphXPortDiffPanel::AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiff
         ? LOCTEXT("SideMine", "MINE")
         : LOCTEXT("SideWorking", "WORKING");
 
-    CompareVariables(BaseSide.Blueprint, MineSide.Blueprint, MineTag);
-    CompareVariables(BaseSide.Blueprint, TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"));
+    CompareVariables(BaseSide.Blueprint, LocalChangeSide().Blueprint, MineTag, /*bFromTheirs=*/false);
+    CompareVariables(BaseSide.Blueprint, TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
 }
 
 void SGraphXPortDiffPanel::AppendDefaultsDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const
@@ -422,7 +482,7 @@ void SGraphXPortDiffPanel::AppendDefaultsDiffs(TArray<TSharedPtr<FGraphXPortDiff
         return;
     }
 
-    auto CompareDefaults = [&OutRows, BaseCDO](const UBlueprint* SideBlueprint, const FText& SideTag)
+    auto CompareDefaults = [&OutRows, BaseCDO](const UBlueprint* SideBlueprint, const FText& SideTag, bool bFromTheirs)
     {
         if (!SideBlueprint)
         {
@@ -460,6 +520,7 @@ void SGraphXPortDiffPanel::AppendDefaultsDiffs(TArray<TSharedPtr<FGraphXPortDiff
             }
 
             Row->bIsMemberRow = true;
+            Row->bFromTheirs = bFromTheirs;
             OutRows.Add(Row);
         }
     };
@@ -468,8 +529,8 @@ void SGraphXPortDiffPanel::AppendDefaultsDiffs(TArray<TSharedPtr<FGraphXPortDiff
         ? LOCTEXT("SideMine", "MINE")
         : LOCTEXT("SideWorking", "WORKING");
 
-    CompareDefaults(MineSide.Blueprint, MineTag);
-    CompareDefaults(TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"));
+    CompareDefaults(LocalChangeSide().Blueprint, MineTag, /*bFromTheirs=*/false);
+    CompareDefaults(TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
 }
 
 void SGraphXPortDiffPanel::AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const
@@ -481,7 +542,7 @@ void SGraphXPortDiffPanel::AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDif
         return;
     }
 
-    auto CompareComponents = [&OutRows](const UBlueprint* Base, const UBlueprint* Side, const FText& SideTag)
+    auto CompareComponents = [&OutRows](const UBlueprint* Base, const UBlueprint* Side, const FText& SideTag, bool bFromTheirs)
     {
         if (!Base || !Side)
         {
@@ -500,6 +561,7 @@ void SGraphXPortDiffPanel::AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDif
                 Row->Label = FText::Format(LOCTEXT("CompAdded", "{0}: Added component '{1}'"), SideTag, FText::FromName(SidePair.Key));
                 Row->Color = AddedColor;
                 Row->bIsMemberRow = true;
+                Row->bFromTheirs = bFromTheirs;
                 Row->ComponentName = SidePair.Key;
                 OutRows.Add(Row);
                 continue;
@@ -511,6 +573,7 @@ void SGraphXPortDiffPanel::AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDif
                 Row->Label = FText::Format(LOCTEXT("CompClassChanged", "{0}: Component '{1}' changed class"), SideTag, FText::FromName(SidePair.Key));
                 Row->Color = ChangedColor;
                 Row->bIsMemberRow = true;
+                Row->bFromTheirs = bFromTheirs;
                 Row->ComponentName = SidePair.Key;
                 OutRows.Add(Row);
                 continue;
@@ -532,6 +595,7 @@ void SGraphXPortDiffPanel::AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDif
                         SideTag, FText::FromName(SidePair.Key), FText::FromString(Difference.Identifier.ToDisplayName()));
                     Row->Color = ChangedColor;
                     Row->bIsMemberRow = true;
+                    Row->bFromTheirs = bFromTheirs;
                     Row->ComponentName = SidePair.Key;
                     OutRows.Add(Row);
                 }
@@ -546,6 +610,7 @@ void SGraphXPortDiffPanel::AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDif
                 Row->Label = FText::Format(LOCTEXT("CompRemoved", "{0}: Removed component '{1}'"), SideTag, FText::FromName(BasePair.Key));
                 Row->Color = RemovedColor;
                 Row->bIsMemberRow = true;
+                Row->bFromTheirs = bFromTheirs;
                 Row->ComponentName = BasePair.Key;
                 OutRows.Add(Row);
             }
@@ -556,8 +621,77 @@ void SGraphXPortDiffPanel::AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDif
         ? LOCTEXT("SideMine", "MINE")
         : LOCTEXT("SideWorking", "WORKING");
 
-    CompareComponents(BaseSide.Blueprint, MineSide.Blueprint, MineTag);
-    CompareComponents(BaseSide.Blueprint, TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"));
+    CompareComponents(BaseSide.Blueprint, LocalChangeSide().Blueprint, MineTag, /*bFromTheirs=*/false);
+    CompareComponents(BaseSide.Blueprint, TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
+}
+
+void SGraphXPortDiffPanel::AppendEntryDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const
+{
+    using namespace GraphXPortDiffPanelPrivate;
+
+    if (!BaseSide.Asset)
+    {
+        return;
+    }
+
+    auto CompareEntries = [&OutRows](const TArray<FGraphXPortAssetEntry>& Base, const TArray<FGraphXPortAssetEntry>& Side, const FText& SideTag, bool bFromTheirs)
+    {
+        for (const FGraphXPortAssetEntry& SideEntry : Side)
+        {
+            const FGraphXPortAssetEntry* BaseEntry = Base.FindByPredicate(
+                [&SideEntry](const FGraphXPortAssetEntry& Candidate) { return Candidate.Key == SideEntry.Key; });
+
+            TSharedPtr<FGraphXPortDiffTreeNode> Row;
+            if (!BaseEntry)
+            {
+                Row = MakeShared<FGraphXPortDiffTreeNode>();
+                Row->Label = FText::Format(LOCTEXT("EntryAdded", "{0}: Added '{1}'"), SideTag, FText::FromString(SideEntry.Display));
+                Row->Color = AddedColor;
+            }
+            else if (BaseEntry->Value != SideEntry.Value)
+            {
+                Row = MakeShared<FGraphXPortDiffTreeNode>();
+                Row->Label = FText::Format(LOCTEXT("EntryChanged", "{0}: Changed '{1}'"), SideTag, FText::FromString(SideEntry.Display));
+                Row->Color = ChangedColor;
+            }
+
+            if (Row.IsValid())
+            {
+                Row->bIsMemberRow = true;
+                Row->bFromTheirs = bFromTheirs;
+                OutRows.Add(Row);
+            }
+        }
+
+        for (const FGraphXPortAssetEntry& BaseEntry : Base)
+        {
+            const bool bStillPresent = Side.ContainsByPredicate(
+                [&BaseEntry](const FGraphXPortAssetEntry& Candidate) { return Candidate.Key == BaseEntry.Key; });
+
+            if (!bStillPresent)
+            {
+                TSharedPtr<FGraphXPortDiffTreeNode> Row = MakeShared<FGraphXPortDiffTreeNode>();
+                Row->Label = FText::Format(LOCTEXT("EntryRemoved", "{0}: Removed '{1}'"), SideTag, FText::FromString(BaseEntry.Display));
+                Row->Color = RemovedColor;
+                Row->bIsMemberRow = true;
+                Row->bFromTheirs = bFromTheirs;
+                OutRows.Add(Row);
+            }
+        }
+    };
+
+    const FText MineTag = Mode == EGraphXPortDiffMode::Conflict3Way
+        ? LOCTEXT("SideMine", "MINE")
+        : LOCTEXT("SideWorking", "WORKING");
+
+    if (LocalChangeSide().Asset)
+    {
+        CompareEntries(BaseSide.Entries, LocalChangeSide().Entries, MineTag, /*bFromTheirs=*/false);
+    }
+    if (TheirsSide.Asset)
+    {
+        CompareEntries(BaseSide.Entries, TheirsSide.Entries, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
+    }
 }
 
 void SGraphXPortDiffPanel::AppendGraphPresenceDiffs(FName GraphName, TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const
@@ -597,7 +731,7 @@ void SGraphXPortDiffPanel::AppendGraphPresenceDiffs(FName GraphName, TArray<TSha
         ? LOCTEXT("SideMine", "MINE")
         : LOCTEXT("SideWorking", "WORKING");
 
-    ComparePresence(MineSide, MineTag);
+    ComparePresence(LocalChangeSide(), MineTag);
     ComparePresence(TheirsSide, LOCTEXT("SideTheirs", "THEIRS"));
 }
 
@@ -611,46 +745,44 @@ void SGraphXPortDiffPanel::BuildDiffTree()
         ? LOCTEXT("SideMine", "MINE")
         : LOCTEXT("SideWorking", "WORKING");
 
-    // Variables and class defaults first, mirroring the engine's My Blueprint section -
-    // a conflict often lives outside the graphs entirely.
+    // Every change, whatever section it came from, is gathered flat first; the tree is then
+    // partitioned into Conflicts / Mine Only / Theirs Only.
+    TArray<TSharedPtr<FGraphXPortDiffTreeNode>> AllRows;
+
+    auto Gather = [&AllRows](TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& Rows, const FText& CategoryLabel)
+    {
+        for (const TSharedPtr<FGraphXPortDiffTreeNode>& Row : Rows)
+        {
+            Row->CategoryLabel = CategoryLabel;
+            AllRows.Add(Row);
+        }
+    };
+
+    // Enums, structs and data tables have no graphs at all - they are compared as a flat
+    // list of entries.
+    if (FGraphXPortAssetDiff::IsEntryBased(ResultSide.Kind) || FGraphXPortAssetDiff::IsEntryBased(BaseSide.Kind))
+    {
+        TArray<TSharedPtr<FGraphXPortDiffTreeNode>> EntryRows;
+        AppendEntryDiffs(EntryRows);
+
+        const EGraphXPortAssetKind Kind = ResultSide.Asset ? ResultSide.Kind : BaseSide.Kind;
+        Gather(EntryRows, FGraphXPortAssetDiff::DescribeEntries(Kind));
+
+        PartitionRowsIntoTree(AllRows);
+        return;
+    }
+
     TArray<TSharedPtr<FGraphXPortDiffTreeNode>> VariableRows;
     AppendVariableDiffs(VariableRows);
-    if (VariableRows.Num() > 0)
-    {
-        TSharedPtr<FGraphXPortDiffTreeNode> Category = MakeShared<FGraphXPortDiffTreeNode>();
-        Category->Label = FText::Format(LOCTEXT("VariablesCategory", "Variables ({0})"), FText::AsNumber(VariableRows.Num()));
-        Category->bIsCategory = true;
-        Category->bIsMemberRow = true;
-        Category->Color = CategoryColor;
-        Category->Children = VariableRows;
-        DiffTreeRoots.Add(Category);
-    }
+    Gather(VariableRows, LOCTEXT("VariablesSection", "Variables"));
 
     TArray<TSharedPtr<FGraphXPortDiffTreeNode>> ComponentRows;
     AppendComponentDiffs(ComponentRows);
-    if (ComponentRows.Num() > 0)
-    {
-        TSharedPtr<FGraphXPortDiffTreeNode> Category = MakeShared<FGraphXPortDiffTreeNode>();
-        Category->Label = FText::Format(LOCTEXT("ComponentsCategory", "Components ({0})"), FText::AsNumber(ComponentRows.Num()));
-        Category->bIsCategory = true;
-        Category->bIsMemberRow = true;
-        Category->Color = CategoryColor;
-        Category->Children = ComponentRows;
-        DiffTreeRoots.Add(Category);
-    }
+    Gather(ComponentRows, LOCTEXT("ComponentsSection", "Components"));
 
     TArray<TSharedPtr<FGraphXPortDiffTreeNode>> DefaultsRows;
     AppendDefaultsDiffs(DefaultsRows);
-    if (DefaultsRows.Num() > 0)
-    {
-        TSharedPtr<FGraphXPortDiffTreeNode> Category = MakeShared<FGraphXPortDiffTreeNode>();
-        Category->Label = FText::Format(LOCTEXT("DefaultsCategory", "Defaults ({0})"), FText::AsNumber(DefaultsRows.Num()));
-        Category->bIsCategory = true;
-        Category->bIsMemberRow = true;
-        Category->Color = CategoryColor;
-        Category->Children = DefaultsRows;
-        DiffTreeRoots.Add(Category);
-    }
+    Gather(DefaultsRows, LOCTEXT("DefaultsSection", "Defaults"));
 
     for (const FName& GraphName : GraphNames)
     {
@@ -660,12 +792,13 @@ void SGraphXPortDiffPanel::BuildDiffTree()
             continue;
         }
 
-        TSharedPtr<FGraphXPortDiffTreeNode> Category = MakeShared<FGraphXPortDiffTreeNode>();
-        Category->bIsCategory = true;
-        Category->GraphName = GraphName;
-        Category->Color = CategoryColor;
+        TArray<TSharedPtr<FGraphXPortDiffTreeNode>> GraphRows;
 
-        auto AddRows = [&Category, &GraphName](const TArray<FDiffSingleResult>& Results, const FText& SideTag, bool bFromTheirs)
+        // A graph that only exists on one side produces no node-level diffs, so surface
+        // its presence explicitly.
+        AppendGraphPresenceDiffs(GraphName, GraphRows);
+
+        auto AddRows = [&GraphRows, &GraphName](const TArray<FDiffSingleResult>& Results, const FText& SideTag, bool bFromTheirs)
         {
             for (const FDiffSingleResult& Result : Results)
             {
@@ -676,23 +809,91 @@ void SGraphXPortDiffPanel::BuildDiffTree()
                 Row->BaseNode = Result.Node1;
                 Row->SideNode = Result.Node2;
                 Row->bFromTheirs = bFromTheirs;
-                Row->bCanJump = Result.Node1 != nullptr || Result.Node2 != nullptr;
-                Category->Children.Add(Row);
+
+                // Prefer the ancestor node's identity: it exists in every revision, so all
+                // three panes can focus it. A node added by one side only resolves there.
+                const UEdGraphNode* IdentityNode = Result.Node1 ? Result.Node1 : Result.Node2;
+                if (IdentityNode)
+                {
+                    Row->NodeGuid = IdentityNode->NodeGuid;
+                }
+                Row->bCanJump = Row->NodeGuid.IsValid();
+
+                GraphRows.Add(Row);
             }
         };
 
-        // A graph that only exists on one side produces no node-level diffs, so surface
-        // its presence explicitly.
-        AppendGraphPresenceDiffs(GraphName, Category->Children);
+        // Outside a conflict there are no git stages: the working tree is the only side
+        // that changed, so its diff against HEAD is what the tree lists.
+        const bool bConflict = Mode == EGraphXPortDiffMode::Conflict3Way;
+        AddRows(bConflict ? *Set->MineDiffs : *Set->ResultDiffs, MineTag, /*bFromTheirs=*/false);
+        if (bConflict)
+        {
+            AddRows(*Set->TheirsDiffs, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
+        }
 
-        AddRows(*Set->MineDiffs, MineTag, /*bFromTheirs=*/false);
-        AddRows(*Set->TheirsDiffs, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
+        Gather(GraphRows, FText::FromName(GraphName));
+    }
 
-        Category->Label = Category->Children.Num() > 0
-            ? FText::Format(LOCTEXT("GraphCategoryChanged", "{0} ({1})"), FText::FromName(GraphName), FText::AsNumber(Category->Children.Num()))
-            : FText::FromName(GraphName);
+    PartitionRowsIntoTree(AllRows);
+}
 
-        DiffTreeRoots.Add(Category);
+void SGraphXPortDiffPanel::PartitionRowsIntoTree(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& AllRows)
+{
+    using namespace GraphXPortDiffPanelPrivate;
+
+    // Groups rows under a section by their category label, preserving discovery order.
+    auto GroupInto = [](const TSharedPtr<FGraphXPortDiffTreeNode>& Parent,
+        const TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& Rows)
+    {
+        TMap<FString, TSharedPtr<FGraphXPortDiffTreeNode>> Groups;
+        for (const TSharedPtr<FGraphXPortDiffTreeNode>& Row : Rows)
+        {
+            const FString GroupKey = Row->CategoryLabel.ToString();
+            TSharedPtr<FGraphXPortDiffTreeNode>& Group = Groups.FindOrAdd(GroupKey);
+            if (!Group.IsValid())
+            {
+                Group = MakeShared<FGraphXPortDiffTreeNode>();
+                Group->bIsCategory = true;
+                Group->Color = CategoryColor;
+                Group->Label = Row->CategoryLabel;
+                Group->GraphName = Row->GraphName;
+                Group->bIsMemberRow = Row->bIsMemberRow;
+                Parent->Children.Add(Group);
+            }
+            Group->Children.Add(Row);
+        }
+    };
+
+    TArray<TSharedPtr<FGraphXPortDiffTreeNode>> MineOnly;
+    TArray<TSharedPtr<FGraphXPortDiffTreeNode>> TheirsOnly;
+    for (const TSharedPtr<FGraphXPortDiffTreeNode>& Row : AllRows)
+    {
+        (Row->bFromTheirs ? TheirsOnly : MineOnly).Add(Row);
+    }
+
+    TSharedPtr<FGraphXPortDiffTreeNode> MineSection = MakeShared<FGraphXPortDiffTreeNode>();
+    MineSection->bIsCategory = true;
+    MineSection->Color = CategoryColor;
+    MineSection->Label = FText::Format(LOCTEXT("MineChangesSection", "Mine Changes ({0})"), FText::AsNumber(MineOnly.Num()));
+    GroupInto(MineSection, MineOnly);
+
+    TSharedPtr<FGraphXPortDiffTreeNode> TheirsSection = MakeShared<FGraphXPortDiffTreeNode>();
+    TheirsSection->bIsCategory = true;
+    TheirsSection->Color = CategoryColor;
+    TheirsSection->Label = FText::Format(LOCTEXT("TheirsChangesSection", "Theirs Changes ({0})"), FText::AsNumber(TheirsOnly.Num()));
+    GroupInto(TheirsSection, TheirsOnly);
+
+    if (Mode == EGraphXPortDiffMode::Conflict3Way)
+    {
+        DiffTreeRoots.Add(MineSection);
+        DiffTreeRoots.Add(TheirsSection);
+    }
+    else
+    {
+        // Outside a conflict there is only one side that changed anything.
+        MineSection->Label = FText::Format(LOCTEXT("ChangesSection", "Changes ({0})"), FText::AsNumber(MineOnly.Num()));
+        DiffTreeRoots.Add(MineSection);
     }
 
     if (DiffTreeView.IsValid())
@@ -712,6 +913,10 @@ void SGraphXPortDiffPanel::ExpandAllTreeItems()
     for (const TSharedPtr<FGraphXPortDiffTreeNode>& Root : DiffTreeRoots)
     {
         DiffTreeView->SetItemExpansion(Root, true);
+        for (const TSharedPtr<FGraphXPortDiffTreeNode>& Group : Root->Children)
+        {
+            DiffTreeView->SetItemExpansion(Group, true);
+        }
     }
 }
 
@@ -722,6 +927,7 @@ void SGraphXPortDiffPanel::ApplySelectedGraphDiffResults()
     BaseSide.DiffResults = Set ? Set->BaseDiffs : nullptr;
     MineSide.DiffResults = Set ? Set->MineDiffs : nullptr;
     TheirsSide.DiffResults = Set ? Set->TheirsDiffs : nullptr;
+    ResultSide.DiffResults = Set ? Set->ResultDiffs : nullptr;
 }
 
 TSharedRef<SWidget> SGraphXPortDiffPanel::BuildToolbarRow()
@@ -746,7 +952,7 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildToolbarRow()
             .ToolTipText(LOCTEXT("SaveTip", "Compile and save the working-tree asset."))
             .Visibility(this, &SGraphXPortDiffPanel::GetPlainSaveVisibility)
             .OnClicked(this, &SGraphXPortDiffPanel::OnSaveClicked)
-            .IsEnabled_Lambda([this]() { return MineSide.Blueprint != nullptr && MineSide.bEditable; })
+            .IsEnabled_Lambda([this]() { return ResultSide.Asset != nullptr && ResultSide.bEditable; })
         ]
         + SHorizontalBox::Slot()
         .AutoWidth()
@@ -758,7 +964,18 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildToolbarRow()
             .ToolTipText(LOCTEXT("SaveResolveTip", "Save the merged result you edited in the Mine pane, then stage it so git records the conflict as resolved."))
             .Visibility(this, &SGraphXPortDiffPanel::GetConflictActionVisibility)
             .OnClicked(this, &SGraphXPortDiffPanel::OnSaveAndResolveClicked)
-            .IsEnabled_Lambda([this]() { return MineSide.Blueprint != nullptr && MineSide.bEditable; })
+            .IsEnabled_Lambda([this]() { return ResultSide.Asset != nullptr && ResultSide.bEditable; })
+        ]
+        + SHorizontalBox::Slot()
+        .AutoWidth()
+        .Padding(12.f, 2.f)
+        .VAlign(VAlign_Center)
+        [
+            SNew(SButton)
+            .Text(this, &SGraphXPortDiffPanel::GetLeftToggleLabel)
+            .ToolTipText(LOCTEXT("ToggleLeftTip", "Switch the left pane between the common ancestor and your own side."))
+            .Visibility(this, &SGraphXPortDiffPanel::GetConflictActionVisibility)
+            .OnClicked(this, &SGraphXPortDiffPanel::OnToggleLeftPaneClicked)
         ]
         + SHorizontalBox::Slot()
         .FillWidth(1.f)
@@ -768,6 +985,20 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildToolbarRow()
             SAssignNew(StatusText, STextBlock)
             .Text(FText::GetEmpty())
         ];
+}
+
+FText SGraphXPortDiffPanel::GetLeftToggleLabel() const
+{
+    return bLeftShowsMine
+        ? LOCTEXT("ShowingMine", "Left: Mine")
+        : LOCTEXT("ShowingBase", "Left: Base");
+}
+
+FReply SGraphXPortDiffPanel::OnToggleLeftPaneClicked()
+{
+    bLeftShowsMine = !bLeftShowsMine;
+    RebuildPanes();
+    return FReply::Handled();
 }
 
 EVisibility SGraphXPortDiffPanel::GetConflictActionVisibility() const
@@ -870,16 +1101,67 @@ void SGraphXPortDiffPanel::OnTreeSelectionChanged(TSharedPtr<FGraphXPortDiffTree
         return;
     }
 
-    if (BasePane.IsValid() && Item->BaseNode)
+    // A MINE change lives in the Mine reference, so flip the left pane to it rather than
+    // focusing a pane the user cannot currently see.
+    if (!Item->bFromTheirs && Mode == EGraphXPortDiffMode::Conflict3Way && !bLeftShowsMine)
     {
-        BasePane->JumpToNode(Item->BaseNode, /*bRequestRename=*/false, /*bSelectNode=*/true);
+        bLeftShowsMine = true;
+        RebuildPanes();
     }
 
-    const TSharedPtr<SGraphEditor>& TargetPane = Item->bFromTheirs ? TheirsPane : MinePane;
-    if (TargetPane.IsValid() && Item->SideNode)
+    RequestJumpToNode(Item->GraphName, Item->NodeGuid);
+}
+
+void SGraphXPortDiffPanel::RequestJumpToNode(FName GraphName, const FGuid& NodeGuid)
+{
+    if (!NodeGuid.IsValid())
     {
-        TargetPane->JumpToNode(Item->SideNode, /*bRequestRename=*/false, /*bSelectNode=*/true);
+        return;
     }
+
+    PendingJumpGraphName = GraphName;
+    PendingJumpNodeGuid = NodeGuid;
+
+    if (!bJumpTimerRegistered)
+    {
+        bJumpTimerRegistered = true;
+        RegisterActiveTimer(0.f, FWidgetActiveTimerDelegate::CreateSP(this, &SGraphXPortDiffPanel::HandlePendingJump));
+    }
+}
+
+EActiveTimerReturnType SGraphXPortDiffPanel::HandlePendingJump(double InCurrentTime, float InDeltaTime)
+{
+    bJumpTimerRegistered = false;
+
+    const FGuid NodeGuid = PendingJumpNodeGuid;
+    const FName GraphName = PendingJumpGraphName;
+    PendingJumpNodeGuid.Invalidate();
+
+    if (!NodeGuid.IsValid())
+    {
+        return EActiveTimerReturnType::Stop;
+    }
+
+    // Every pane focuses the same node resolved in its own revision, so the three views stay
+    // lined up on whatever the row refers to. A pane whose revision lacks the node is left
+    // where it is rather than jumping somewhere arbitrary.
+    auto FocusPane = [this, &GraphName, &NodeGuid](const TSharedPtr<SGraphEditor>& Pane, const FSideData& Side)
+    {
+        if (!Pane.IsValid())
+        {
+            return;
+        }
+        if (UEdGraphNode* Node = FindNodeForSide(Side, GraphName, NodeGuid))
+        {
+            Pane->JumpToNode(Node, /*bRequestRename=*/false, /*bSelectNode=*/true);
+        }
+    };
+
+    FocusPane(LeftPane, bLeftShowsMine ? MineSide : BaseSide);
+    FocusPane(ResultPane, ResultSide);
+    FocusPane(TheirsPane, TheirsSide);
+
+    return EActiveTimerReturnType::Stop;
 }
 
 FText SGraphXPortDiffPanel::GetCurrentGraphLabel() const
@@ -906,12 +1188,12 @@ void SGraphXPortDiffPanel::CopySelectedNodes(const TSharedPtr<SGraphEditor>* Pan
 
 bool SGraphXPortDiffPanel::CanPasteIntoMine() const
 {
-    if (!MinePane.IsValid() || !MineSide.bEditable)
+    if (!ResultPane.IsValid() || !ResultSide.bEditable)
     {
         return false;
     }
 
-    UEdGraph* Graph = MinePane->GetCurrentGraph();
+    UEdGraph* Graph = ResultPane->GetCurrentGraph();
     if (!Graph)
     {
         return false;
@@ -924,12 +1206,12 @@ bool SGraphXPortDiffPanel::CanPasteIntoMine() const
 
 void SGraphXPortDiffPanel::PasteNodesIntoMine()
 {
-    if (!MinePane.IsValid() || !MineSide.bEditable || !MineSide.Blueprint)
+    if (!ResultPane.IsValid() || !ResultSide.bEditable || !ResultSide.Blueprint)
     {
         return;
     }
 
-    UEdGraph* Graph = MinePane->GetCurrentGraph();
+    UEdGraph* Graph = ResultPane->GetCurrentGraph();
     if (!Graph)
     {
         return;
@@ -944,7 +1226,7 @@ void SGraphXPortDiffPanel::PasteNodesIntoMine()
 
     const FScopedTransaction Transaction(LOCTEXT("PasteNodes", "Paste Nodes"));
     Graph->Modify();
-    MinePane->ClearSelectionSet();
+    ResultPane->ClearSelectionSet();
 
     TSet<UEdGraphNode*> PastedNodes;
     FEdGraphUtilities::ImportNodesFromText(Graph, TextToImport, PastedNodes);
@@ -961,10 +1243,10 @@ void SGraphXPortDiffPanel::PasteNodesIntoMine()
         AvgPosition /= static_cast<float>(PastedNodes.Num());
     }
 
-    const FVector2D PasteLocation = MinePane->GetPasteLocation();
+    const FVector2D PasteLocation = ResultPane->GetPasteLocation();
     for (UEdGraphNode* Node : PastedNodes)
     {
-        MinePane->SetNodeSelection(Node, true);
+        ResultPane->SetNodeSelection(Node, true);
         Node->NodePosX = (Node->NodePosX - AvgPosition.X) + PasteLocation.X;
         Node->NodePosY = (Node->NodePosY - AvgPosition.Y) + PasteLocation.Y;
         Node->SnapToGrid(16);
@@ -972,24 +1254,24 @@ void SGraphXPortDiffPanel::PasteNodesIntoMine()
         Node->CreateNewGuid();
     }
 
-    MinePane->NotifyGraphChanged();
-    FBlueprintEditorUtils::MarkBlueprintAsModified(MineSide.Blueprint.Get());
+    ResultPane->NotifyGraphChanged();
+    FBlueprintEditorUtils::MarkBlueprintAsModified(ResultSide.Blueprint.Get());
 }
 
 void SGraphXPortDiffPanel::DeleteSelectedMineNodes()
 {
-    if (!MinePane.IsValid() || !MineSide.bEditable || !MineSide.Blueprint)
+    if (!ResultPane.IsValid() || !ResultSide.bEditable || !ResultSide.Blueprint)
     {
         return;
     }
 
-    UEdGraph* Graph = MinePane->GetCurrentGraph();
+    UEdGraph* Graph = ResultPane->GetCurrentGraph();
     if (!Graph)
     {
         return;
     }
 
-    const FGraphPanelSelectionSet Selected = MinePane->GetSelectedNodes();
+    const FGraphPanelSelectionSet Selected = ResultPane->GetSelectedNodes();
     if (Selected.Num() == 0)
     {
         return;
@@ -1008,9 +1290,9 @@ void SGraphXPortDiffPanel::DeleteSelectedMineNodes()
         }
     }
 
-    MinePane->ClearSelectionSet();
-    MinePane->NotifyGraphChanged();
-    FBlueprintEditorUtils::MarkBlueprintAsModified(MineSide.Blueprint.Get());
+    ResultPane->ClearSelectionSet();
+    ResultPane->NotifyGraphChanged();
+    FBlueprintEditorUtils::MarkBlueprintAsModified(ResultSide.Blueprint.Get());
 }
 
 TSharedRef<SWidget> SGraphXPortDiffPanel::BuildMembersWidget(const FSideData& Side) const
@@ -1206,6 +1488,101 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildMembersWidget(const FSideData& Si
         ];
 }
 
+TSharedRef<SWidget> SGraphXPortDiffPanel::BuildEntryListWidget(const FSideData& Side) const
+{
+    using namespace GraphXPortDiffPanelPrivate;
+
+    const bool bIsBase = &Side == &BaseSide;
+
+    TSharedRef<SGridPanel> Grid = SNew(SGridPanel);
+
+    auto MakeCell = [](const FString& Text, const FLinearColor& Color, bool bHeader)
+    {
+        return SNew(SBox)
+            .MaxDesiredWidth(260.f)
+            .Padding(FMargin(8.f, 3.f))
+            [
+                SNew(STextBlock)
+                .Text(FText::FromString(Text))
+                .ToolTipText(FText::FromString(Text))
+                .ColorAndOpacity(FSlateColor(Color))
+                .Font(bHeader
+                    ? FAppStyle::Get().GetFontStyle("DetailsView.CategoryFontStyle")
+                    : FAppStyle::Get().GetFontStyle("NormalFont"))
+            ];
+    };
+
+    // Header row
+    for (int32 ColumnIndex = 0; ColumnIndex < Side.Columns.Num(); ++ColumnIndex)
+    {
+        Grid->AddSlot(ColumnIndex, 0)
+        [
+            SNew(SBorder)
+            .BorderImage(FAppStyle::Get().GetBrush("DetailsView.CategoryTop"))
+            [
+                MakeCell(Side.Columns[ColumnIndex], CategoryColor, /*bHeader=*/true)
+            ]
+        ];
+    }
+
+    int32 Row = 1;
+    for (const FGraphXPortAssetEntry& AssetEntry : Side.Entries)
+    {
+        auto Find = [&AssetEntry](const TArray<FGraphXPortAssetEntry>& In) -> const FGraphXPortAssetEntry*
+        {
+            return In.FindByPredicate(
+                [&AssetEntry](const FGraphXPortAssetEntry& Candidate) { return Candidate.Key == AssetEntry.Key; });
+        };
+
+        const FGraphXPortAssetEntry* BaseEntry = BaseSide.Asset ? Find(BaseSide.Entries) : nullptr;
+
+        FLinearColor RowColor = UnchangedColor;
+        if (bIsBase)
+        {
+            const bool bMissingSomewhere =
+                (MineSide.Asset && !Find(MineSide.Entries)) ||
+                (TheirsSide.Asset && !Find(TheirsSide.Entries));
+            RowColor = bMissingSomewhere ? RemovedColor : UnchangedColor;
+        }
+        else if (BaseSide.Asset && !BaseEntry)
+        {
+            RowColor = AddedColor;
+        }
+
+        for (int32 ColumnIndex = 0; ColumnIndex < AssetEntry.Cells.Num(); ++ColumnIndex)
+        {
+            // An unchanged row still highlights the individual cells that differ, so a
+            // single edited value in a wide table is visible without hunting.
+            FLinearColor CellColor = RowColor;
+            if (RowColor == UnchangedColor && BaseEntry && !bIsBase
+                && BaseEntry->Cells.IsValidIndex(ColumnIndex)
+                && BaseEntry->Cells[ColumnIndex] != AssetEntry.Cells[ColumnIndex])
+            {
+                CellColor = ChangedColor;
+            }
+
+            Grid->AddSlot(ColumnIndex, Row)
+            [
+                MakeCell(AssetEntry.Cells[ColumnIndex], CellColor, /*bHeader=*/false)
+            ];
+        }
+
+        ++Row;
+    }
+
+    // Wide tables scroll horizontally rather than being clipped by the pane.
+    return SNew(SScrollBox)
+        + SScrollBox::Slot()
+        [
+            SNew(SScrollBox)
+            .Orientation(Orient_Horizontal)
+            + SScrollBox::Slot()
+            [
+                Grid
+            ]
+        ];
+}
+
 TSharedRef<SWidget> SGraphXPortDiffPanel::BuildSideWidget(const FSideData& Side, TSharedPtr<SGraphEditor>& OutPane, TSharedPtr<FUICommandList>& OutCommands)
 {
     TSharedRef<SVerticalBox> Container = SNew(SVerticalBox)
@@ -1217,6 +1594,17 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildSideWidget(const FSideData& Side,
             .Text(Side.Label)
             .Font(FAppStyle::Get().GetFontStyle("BoldFont"))
         ];
+
+    // Entry-based assets have no graphs; they are always shown as their entry list.
+    if (FGraphXPortAssetDiff::IsEntryBased(Side.Kind) && Side.Asset)
+    {
+        Container->AddSlot()
+        .FillHeight(1.f)
+        [
+            BuildEntryListWidget(Side)
+        ];
+        return Container;
+    }
 
     if (!Side.Blueprint)
     {
@@ -1339,11 +1727,11 @@ void SGraphXPortDiffPanel::RebuildPanes()
         return;
     }
 
-    BasePane.Reset();
-    MinePane.Reset();
+    LeftPane.Reset();
+    ResultPane.Reset();
     TheirsPane.Reset();
-    BasePaneCommands.Reset();
-    MinePaneCommands.Reset();
+    LeftPaneCommands.Reset();
+    ResultPaneCommands.Reset();
     TheirsPaneCommands.Reset();
 
     struct FActiveSide
@@ -1353,23 +1741,26 @@ void SGraphXPortDiffPanel::RebuildPanes()
         TSharedPtr<FUICommandList>* Commands;
     };
 
+    // The left pane shows whichever reference the toggle selects.
+    const FSideData* LeftSide = bLeftShowsMine ? &MineSide : &BaseSide;
+
     TArray<FActiveSide> ActiveSides;
     switch (Mode)
     {
     case EGraphXPortDiffMode::Conflict3Way:
-        ActiveSides.Add({ &BaseSide, &BasePane, &BasePaneCommands });
-        ActiveSides.Add({ &MineSide, &MinePane, &MinePaneCommands });
+        ActiveSides.Add({ LeftSide, &LeftPane, &LeftPaneCommands });
+        ActiveSides.Add({ &ResultSide, &ResultPane, &ResultPaneCommands });
         ActiveSides.Add({ &TheirsSide, &TheirsPane, &TheirsPaneCommands });
         break;
     case EGraphXPortDiffMode::ModifiedCompare:
-        ActiveSides.Add({ &BaseSide, &BasePane, &BasePaneCommands });
-        ActiveSides.Add({ &MineSide, &MinePane, &MinePaneCommands });
+        ActiveSides.Add({ &BaseSide, &LeftPane, &LeftPaneCommands });
+        ActiveSides.Add({ &ResultSide, &ResultPane, &ResultPaneCommands });
         break;
     case EGraphXPortDiffMode::SingleReadOnly:
-        ActiveSides.Add({ &BaseSide, &BasePane, &BasePaneCommands });
+        ActiveSides.Add({ &BaseSide, &LeftPane, &LeftPaneCommands });
         break;
     case EGraphXPortDiffMode::NewFile:
-        ActiveSides.Add({ &MineSide, &MinePane, &MinePaneCommands });
+        ActiveSides.Add({ &ResultSide, &ResultPane, &ResultPaneCommands });
         break;
     case EGraphXPortDiffMode::None:
     default:
@@ -1402,32 +1793,43 @@ void SGraphXPortDiffPanel::RebuildPanes()
 
 bool SGraphXPortDiffPanel::CompileMine()
 {
-    if (!MineSide.Blueprint || !MineSide.bEditable)
+    if (!ResultSide.Asset || !ResultSide.bEditable)
     {
         return false;
     }
 
-    FKismetEditorUtilities::CompileBlueprint(MineSide.Blueprint.Get());
-    return MineSide.Blueprint->Status != BS_Error;
+    // Enums, structs and data tables have no Blueprint to compile.
+    if (!ResultSide.Blueprint)
+    {
+        return true;
+    }
+
+    FKismetEditorUtilities::CompileBlueprint(ResultSide.Blueprint.Get());
+    return ResultSide.Blueprint->Status != BS_Error;
 }
 
 bool SGraphXPortDiffPanel::SaveMinePackage()
 {
-    if (!MineSide.Blueprint || !MineSide.bEditable)
+    if (!ResultSide.Asset || !ResultSide.bEditable)
     {
         return false;
     }
 
-    UPackage* Package = MineSide.Blueprint->GetOutermost();
+    const bool bIsMap = ResultSide.Kind == EGraphXPortAssetKind::LevelScript;
+
+    UPackage* Package = ResultSide.Asset->GetOutermost();
     FString Filename;
-    if (!FPackageName::TryConvertLongPackageNameToFilename(Package->GetName(), Filename, FPackageName::GetAssetPackageExtension()))
+    if (!FPackageName::TryConvertLongPackageNameToFilename(Package->GetName(), Filename,
+        bIsMap ? FPackageName::GetMapPackageExtension() : FPackageName::GetAssetPackageExtension()))
     {
         return false;
     }
 
     FSavePackageArgs SaveArgs;
-    SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
-    return UPackage::SavePackage(Package, MineSide.Blueprint.Get(), *Filename, SaveArgs);
+    // A map's top-level object is the world itself, which does not carry the
+    // public/standalone flags an asset package's does.
+    SaveArgs.TopLevelFlags = bIsMap ? RF_NoFlags : (RF_Public | RF_Standalone);
+    return UPackage::SavePackage(Package, ResultSide.Asset.Get(), *Filename, SaveArgs);
 }
 
 bool SGraphXPortDiffPanel::StageResolvedFile()

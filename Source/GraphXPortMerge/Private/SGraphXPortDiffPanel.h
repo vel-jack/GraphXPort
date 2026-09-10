@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "DiffResults.h"
+#include "GraphXPortAssetDiff.h"
 #include "GraphXPortGitStatus.h"
 #include "UObject/GCObject.h"
 #include "Widgets/SCompoundWidget.h"
@@ -46,6 +47,12 @@ struct FGraphXPortDiffTreeNode
     UEdGraphNode* SideNode = nullptr;
     bool bFromTheirs = false;
     bool bCanJump = false;
+    /** Which section this row came from: a graph name, or Variables/Components/Defaults. */
+    FText CategoryLabel;
+    /** The node to focus. Each pane resolves it in its own revision, so a row holds no
+     *  pointer into one particular revision's graph. */
+    FGuid NodeGuid;
+
     TArray<TSharedPtr<FGraphXPortDiffTreeNode>> Children;
 };
 
@@ -86,12 +93,18 @@ private:
     struct FSideData
     {
         FText Label;
+        /** The asset itself; for a level this is the world, not the script Blueprint. */
+        TObjectPtr<UObject> Asset = nullptr;
         TObjectPtr<UBlueprint> Blueprint = nullptr;
         TObjectPtr<UPackage> Package = nullptr;
+        EGraphXPortAssetKind Kind = EGraphXPortAssetKind::None;
         bool bEditable = false;
         bool bIsTemp = false;
         FString UnavailableReason;
         TSharedPtr<TArray<FDiffSingleResult>> DiffResults;
+        /** Populated for entry-based kinds (enum, struct, data table). */
+        TArray<FGraphXPortAssetEntry> Entries;
+        TArray<FString> Columns;
     };
 
     /** Per-graph diff results, computed once per file so the tree can list every graph. */
@@ -99,6 +112,7 @@ private:
     {
         TSharedPtr<TArray<FDiffSingleResult>> MineDiffs;
         TSharedPtr<TArray<FDiffSingleResult>> TheirsDiffs;
+        TSharedPtr<TArray<FDiffSingleResult>> ResultDiffs;
         TSharedPtr<TArray<FDiffSingleResult>> BaseDiffs;
     };
 
@@ -111,14 +125,34 @@ private:
     void AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendDefaultsDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
+    void AppendEntryDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendGraphPresenceDiffs(FName GraphName, TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void BuildDiffTree();
+    /** Assembles the Mine / Theirs sections from the gathered rows. */
+    void PartitionRowsIntoTree(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& AllRows);
     void ApplySelectedGraphDiffResults();
     void RebuildPanes();
 
+    /**
+     * The side holding "my" changes for comparison purposes. In a conflict that is the
+     * read-only stage-2 revision; otherwise there are no git stages and the working tree
+     * itself is the only thing that changed.
+     */
+    const FSideData& LocalChangeSide() const
+    {
+        return Mode == EGraphXPortDiffMode::Conflict3Way ? MineSide : ResultSide;
+    }
+
     UEdGraph* FindGraphForSide(const FSideData& Side, FName GraphName) const;
+    UEdGraphNode* FindNodeForSide(const FSideData& Side, FName GraphName, const FGuid& NodeGuid) const;
+    /** Queues a focus for the next tick. Jumping in the same frame the panes were rebuilt
+     *  does nothing, because a freshly constructed SGraphEditor has no geometry to centre
+     *  against yet. */
+    void RequestJumpToNode(FName GraphName, const FGuid& NodeGuid);
+    EActiveTimerReturnType HandlePendingJump(double InCurrentTime, float InDeltaTime);
     TSharedRef<SWidget> BuildSideWidget(const FSideData& Side, TSharedPtr<SGraphEditor>& OutPane, TSharedPtr<FUICommandList>& OutCommands);
     TSharedRef<SWidget> BuildMembersWidget(const FSideData& Side) const;
+    TSharedRef<SWidget> BuildEntryListWidget(const FSideData& Side) const;
     TSharedRef<SWidget> BuildToolbarRow();
     TSharedRef<SWidget> BuildDiffTreeWidget();
     TSharedRef<ITableRow> GenerateTreeRow(TSharedPtr<FGraphXPortDiffTreeNode> Item, const TSharedRef<STableViewBase>& OwnerTable);
@@ -128,6 +162,8 @@ private:
     FText GetCurrentGraphLabel() const;
     FReply OnSaveClicked();
     FReply OnSaveAndResolveClicked();
+    FReply OnToggleLeftPaneClicked();
+    FText GetLeftToggleLabel() const;
     /** Compiles the Mine blueprint; false if it finished with errors. */
     bool CompileMine();
     bool SaveMinePackage();
@@ -144,9 +180,15 @@ private:
     TSharedPtr<FGraphXPortGitFileEntry> Entry;
     EGraphXPortDiffMode Mode = EGraphXPortDiffMode::None;
 
+    // Base, Mine and Theirs are the three git stages, all read-only. Result is the real
+    // working asset - the only editable side, and the only one ever saved.
     FSideData BaseSide;
     FSideData MineSide;
     FSideData TheirsSide;
+    FSideData ResultSide;
+
+    /** The left pane shows Base or Mine; Mine is what you copy from once seeded from Theirs. */
+    bool bLeftShowsMine = false;
 
     TArray<FName> GraphNames;
     FName SelectedGraphName;
@@ -160,15 +202,20 @@ private:
     TSharedPtr<STreeView<TSharedPtr<FGraphXPortDiffTreeNode>>> DiffTreeView;
     TSharedPtr<SWidget> DiffTreeWidget;
 
-    TSharedPtr<SGraphEditor> BasePane;
-    TSharedPtr<SGraphEditor> MinePane;
+    /** Left pane, showing whichever of Base/Mine the toggle selects. */
+    TSharedPtr<SGraphEditor> LeftPane;
+    TSharedPtr<SGraphEditor> ResultPane;
     TSharedPtr<SGraphEditor> TheirsPane;
 
     // SGraphEditor only holds a weak reference to appended command lists, so these must
     // be kept alive here or every binding silently stops working.
-    TSharedPtr<FUICommandList> BasePaneCommands;
-    TSharedPtr<FUICommandList> MinePaneCommands;
+    TSharedPtr<FUICommandList> LeftPaneCommands;
+    TSharedPtr<FUICommandList> ResultPaneCommands;
     TSharedPtr<FUICommandList> TheirsPaneCommands;
+
+    FGuid PendingJumpNodeGuid;
+    FName PendingJumpGraphName;
+    bool bJumpTimerRegistered = false;
 
     TSharedPtr<SBox> PanesContainer;
     TSharedPtr<STextBlock> StatusText;

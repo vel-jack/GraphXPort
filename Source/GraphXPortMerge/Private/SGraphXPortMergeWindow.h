@@ -23,6 +23,10 @@ public:
 
     void Construct(const FArguments& InArgs);
 
+    /** Tears down the displayed revisions and their panes. Must run before the loaded
+     *  revisions are garbage collected, or the panes would be left dangling. */
+    void ReleaseRevisions();
+
 private:
     TSharedRef<SWidget> BuildUnavailableNotice(EGraphXPortGitAvailability Availability) const;
     TSharedRef<SWidget> BuildFileListPanel();

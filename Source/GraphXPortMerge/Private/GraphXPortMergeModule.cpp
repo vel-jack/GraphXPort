@@ -38,12 +38,29 @@ void FGraphXPortMergeModule::ShutdownModule()
 
 TSharedRef<SDockTab> FGraphXPortMergeModule::SpawnMergeTab(const FSpawnTabArgs& Args)
 {
-    return SNew(SDockTab)
+    TSharedRef<SGraphXPortMergeWindow> Window = SNew(SGraphXPortMergeWindow);
+    TWeakPtr<SGraphXPortMergeWindow> WeakWindow = Window;
+
+    TSharedRef<SDockTab> Tab = SNew(SDockTab)
         .TabRole(ETabRole::NomadTab)
         .Label(LOCTEXT("MergeTabTitle", "GraphXPort Merge"))
         [
-            SNew(SGraphXPortMergeWindow)
+            Window
         ];
+
+    // Revisions stay loaded as real assets while the window is open, which means their
+    // classes and structs appear in class/struct pickers. Closing the tab clears them.
+    Tab->SetOnTabClosed(SDockTab::FOnTabClosedCallback::CreateLambda(
+        [WeakWindow](TSharedRef<SDockTab>)
+        {
+            if (TSharedPtr<SGraphXPortMergeWindow> Pinned = WeakWindow.Pin())
+            {
+                Pinned->ReleaseRevisions();
+            }
+            FGraphXPortTempPackage::PurgeLoadedRevisions();
+        }));
+
+    return Tab;
 }
 
 IMPLEMENT_MODULE(FGraphXPortMergeModule, GraphXPortMerge)

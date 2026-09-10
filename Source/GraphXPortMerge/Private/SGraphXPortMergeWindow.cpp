@@ -166,6 +166,18 @@ void SGraphXPortMergeWindow::OnFileSelectionChanged(FGraphXPortGitFileEntryPtr S
     }
 }
 
+void SGraphXPortMergeWindow::ReleaseRevisions()
+{
+    if (FileListView.IsValid())
+    {
+        FileListView->ClearSelection();
+    }
+    if (DiffPanel.IsValid())
+    {
+        DiffPanel->SetFile(RepoRoot, nullptr);
+    }
+}
+
 void SGraphXPortMergeWindow::OnFileResolved()
 {
     // The resolved entry is gone from the unstaged list, so clear the panes before its
