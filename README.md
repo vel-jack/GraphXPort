@@ -44,18 +44,27 @@ participate in short-ID collision detection, including links through reroutes.
 resolving Blueprint changes against git. It requires git on `PATH` and the
 project to be inside a working tree; otherwise it says so instead of opening.
 
-The window lists unstaged changes (`M`, `A`, `D`, `R`, `?`, and `U` for
-conflicts) and shows the selected file's Blueprint revisions side by side in real
-Unreal graph editors: Base / Mine / Theirs for a conflict, HEAD / Working for an
+The file list has three sections:
+
+- **Unstaged Changes** (`M`, `A`, `D`, `R`, `?`, and `U` for conflicts) - the only
+  editable section.
+- **Staged Changes** - HEAD against what you have staged.
+- **History** - recent commits that touched assets. Expand one to see its assets;
+  selecting an asset shows what that commit changed (its parent against the
+  commit). Hover a commit for the full message.
+
+The selected file's revisions are shown side by side in real Unreal graph
+editors: Base / Mine / Result / Theirs for a conflict, HEAD / Working for an
 ordinary edit. Changed nodes are highlighted by the engine's own diff rendering.
+Staged and History views are read-only.
 
 A differences tree lists every change - graph nodes, variables, class defaults,
 and components - and clicking one jumps the panes to it. Selecting a non-graph
 difference swaps the panes to a member list with a Details panel, so a changed
 tooltip, tag, or default value is visible rather than just named.
 
-Only the **Mine** pane is editable. You merge by hand: select nodes in any pane,
-copy, and paste into Mine, then edit or delete as needed. **Save & Mark Resolved**
+Only the **Result** pane is editable. You merge by hand: select nodes in any pane,
+copy, and paste into Result, then edit or delete as needed. **Save & Mark Resolved**
 compiles the result, saves it, and stages the file so git records the conflict as
 resolved; it refuses if the Blueprint does not compile. Committing, and taking
 one side wholesale, stay in your own git tool.

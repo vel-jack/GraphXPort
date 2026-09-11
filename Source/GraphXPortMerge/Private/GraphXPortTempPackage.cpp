@@ -1,6 +1,7 @@
 #include "GraphXPortTempPackage.h"
 
 #include "DiffUtils.h"
+#include "Editor.h"
 #include "Engine/Blueprint.h"
 #include "Engine/Level.h"
 #include "Engine/LevelScriptBlueprint.h"
@@ -11,6 +12,7 @@
 #include "Misc/PackageName.h"
 #include "Misc/PackagePath.h"
 #include "Misc/Paths.h"
+#include "PackageTools.h"
 #include "UObject/GarbageCollection.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectGlobals.h"
@@ -184,4 +186,77 @@ bool FGraphXPortTempPackage::ResolveRealAsset(const FString& RepoRoot, const FSt
     ClassifyPackageAsset(Package, OutResult, OutError);
 
     return OutResult.IsValid();
+}
+
+bool FGraphXPortTempPackage::ReplaceWorkingFileWithRevision(const FString& RepoRoot, const FString& RefSpec, const FString& RepoRelativePath, FString& OutError)
+{
+    OutError.Empty();
+
+    const FString AbsPath = FPaths::ConvertRelativePathToFull(RepoRoot / RepoRelativePath);
+
+    FString LongPackageName;
+    if (!FPackageName::TryConvertFilenameToLongPackageName(AbsPath, LongPackageName))
+    {
+        OutError = TEXT("Not a recognized Unreal asset path.");
+        return false;
+    }
+
+    if (!FGraphXPortGitBlob::BlobExists(RepoRoot, RefSpec, RepoRelativePath))
+    {
+        OutError = TEXT("That side does not contain this file.");
+        return false;
+    }
+
+    UPackage* Package = FindPackage(nullptr, *LongPackageName);
+    if (Package)
+    {
+        // Reloading the level the editor is showing would pull the world out from under
+        // every viewport and outliner.
+        if (UWorld* World = UWorld::FindWorldInPackage(Package))
+        {
+            if (GEditor && GEditor->GetEditorWorldContext().World() == World)
+            {
+                OutError = TEXT("This level is open in the editor. Open a different level first.");
+                return false;
+            }
+        }
+
+        if (!Package->IsFullyLoaded())
+        {
+            FlushAsyncLoading();
+            Package->FullyLoad();
+        }
+        ResetLoaders(Package);
+    }
+
+    // Extract beside the target, then move over it, so a failed extraction can never leave
+    // a truncated asset behind. The extension keeps the directory watcher from treating the
+    // staging file as a package.
+    const FString StagingPath = AbsPath + TEXT(".gxptmp");
+    if (!FGraphXPortGitBlob::ExtractBlobToFile(RepoRoot, RefSpec, RepoRelativePath, StagingPath))
+    {
+        IFileManager::Get().Delete(*StagingPath, /*RequireExists=*/false, /*EvenReadOnly=*/true);
+        OutError = TEXT("Failed to read that side from git.");
+        return false;
+    }
+
+    if (!IFileManager::Get().Move(*AbsPath, *StagingPath, /*Replace=*/true, /*EvenIfReadOnly=*/true))
+    {
+        IFileManager::Get().Delete(*StagingPath, /*RequireExists=*/false, /*EvenReadOnly=*/true);
+        OutError = TEXT("Could not replace the file - it may be open in another program.");
+        return false;
+    }
+
+    if (Package)
+    {
+        FText ReloadError;
+        UPackageTools::ReloadPackages({ Package }, ReloadError, EReloadPackagesInteractionMode::AssumePositive);
+        if (!ReloadError.IsEmpty())
+        {
+            // The file is already replaced; only the in-memory copy may be stale.
+            OutError = ReloadError.ToString();
+        }
+    }
+
+    return true;
 }

@@ -79,10 +79,18 @@ Keep responsibilities separated:
   `.uasset` payloads survive, and launches detached so Windows gives the child no
   console. Launching merely "hidden" is not enough: `bLaunchReallyHidden` only sets
   `SW_HIDE`, which Windows Terminal ignores, popping a visible window per call.
-- `GraphXPortGitStatus` parses `git status --porcelain=v2` and stages files.
-  Keep parsing in `ParseStatusOutput`, separate from process execution, so it
-  stays testable.
-- `GraphXPortGitBlob` extracts a revision's bytes for a path.
+- `GraphXPortGitStatus` parses `git status --porcelain=v2` into unstaged (Y column)
+  and staged (X column) entries, and stages files. Keep parsing in
+  `ParseStatusOutput`, separate from process execution, so it stays testable.
+- `GraphXPortGitHistory` pages through `git log --name-status` for `.uasset`/`.umap`
+  files, with the same parse/execute split (`ParseLogOutput`). Commit fields are
+  delimited by `\x1e`/`\x1f`, which cannot occur in commit messages. It is read-only.
+- Every file entry records its `Source` (unstaged, staged, commit) and, for a
+  rename, `OriginalPath`. The "before" revision is always read at `BeforePath()`,
+  because HEAD or the parent still has the file under its old name.
+- `GraphXPortGitBlob` extracts a revision's bytes for a path. The refspec is
+  anything git accepts before `:path` - a commit, `HEAD`, `<hash>^`, a conflict
+  stage (`:2`), or empty for the index.
 - `GraphXPortTempPackage` loads a revision using the engine's own
   `DiffUtils::LoadPackageForDiff`. Use that helper rather than a hand-rolled
   `LoadPackage`: it loads from a loose file with
@@ -194,12 +202,26 @@ It must stay within these bounds:
   graph a live `SGraphEditor` still points at crashes the editor. Reference them
   as `TObjectPtr`, not raw pointers - the raw-pointer `AddReferencedObject`
   overload is documented to crash under incremental GC.
-- The merge window never overwrites the working-tree file with a revision's
-  bytes. Two features that did were implemented and deliberately removed:
-  "Accept current/incoming", and "Start from Mine / Start from Incoming" seeding.
-  Wholesale side-taking belongs in the user's git tool, and overwriting a loaded
-  `.uasset` on disk fails anyway while the editor holds the file open. Do not
-  reintroduce either without this section being updated first and explicit sign-off.
+- **Start from Mine / Start from Incoming** is the one place the working-tree file
+  is overwritten with a revision's bytes (re-added with explicit sign-off on
+  2026-09-11, after an earlier version was removed). It lets the user build Result
+  on whichever side changed more and copy the smaller side's changes into it. Bounds:
+  - Only in a conflict, only from stage 2 or 3, and only after a confirmation dialog
+    that says when saved or unsaved merge edits will be lost. It never stages;
+    **Save & Mark Resolved** is still the only way a conflict is marked resolved.
+  - `FGraphXPortTempPackage::ReplaceWorkingFileWithRevision` follows the engine's
+    source-control revert order: `ResetLoaders` to release the file handle, write
+    to a sibling `.gxptmp` file and move it over, then `UPackageTools::ReloadPackages`.
+    Writing without detaching the linker fails because the editor holds the file
+    open - that is why the first version failed. Never `UnloadPackages` instead.
+  - Tear down every pane and drop every reference into the live asset *before* the
+    reload, because reloading replaces its objects.
+  - Refuse a level that is open in the editor.
+  - The toolbar shows what Result's file currently matches (Mine, Incoming, or saved
+    merge edits) by comparing `git hash-object` with the stage blob ids, so the
+    state is visible rather than remembered.
+- "Accept current/incoming" (take a side and mark resolved in one click) stays
+  removed. Wholesale side-taking without review belongs in the user's git tool.
 - Resolution is: the user edits Result with ordinary graph editing - copying nodes
   from any read-only pane and pasting into Result - then **Save & Mark Resolved**
   compiles, saves, and runs `git add`. A failed compile must abort the whole action
@@ -213,9 +235,13 @@ It must stay within these bounds:
   The purge exists because revisions are real assets while loaded, so their
   classes and structs otherwise appear in class/struct pickers.
 - Staging is the only git write. Never commit, push, checkout, reset, or
-  otherwise move the user's branch state from inside the editor.
-- Only unstaged worktree entries are listed, deliberately. Staged files are the
-  user's git tool's business.
+  otherwise move the user's branch state from inside the editor. Start from
+  Mine/Incoming writes the file itself from `git show` output; it runs no git
+  command that changes the index or refs.
+- Only **Unstaged** entries are editable. **Staged** (HEAD vs index) and **History**
+  (a commit's first parent vs the commit) load both sides as diff-only revisions:
+  no Save button, no paste, nothing written. Staging, unstaging, and anything else
+  that changes the index stays in the user's git tool.
 
 Future import or merge operations must be:
 
@@ -239,8 +265,15 @@ rendering and editing rather than a reimplementation.
 
 Current behaviour:
 
+- The file list has three sections: **Unstaged Changes**, **Staged Changes**, and
+  **History** (100 commits per page, "Load more" for older ones). A file staged and
+  then edited again appears in both of the first two, each with its own diff.
 - Conflicts (`U`) show Base/Mine (toggle) / Result / Theirs; unstaged edits
-  (`M`, `R`) show HEAD / Working tree.
+  (`M`, `R`) show HEAD / Working tree; staged entries show HEAD / Staged; a file
+  under a commit shows Parent / Commit. Merge commits compare against their first
+  parent (`--diff-merges=first-parent`).
+- Data table, enum and struct rows keep their authored order - it is serialized,
+  so a pure reorder is reported as its own "Order changed" difference.
 - Node-level differences come from `FGraphDiffControl::DiffGraphs`, and each side
   is diffed against the common ancestor so a pane shows what *that* side changed.
   Results are handed to `SGraphEditor`'s own `DiffResults` argument, so
@@ -297,7 +330,8 @@ After C++ changes:
    `AR_GIS_MAPEditor` in DSM, or `UE_544_MCPEditor` in the dedicated test project.
 2. Run the `GraphXPort.` automation group, including
    `GraphXPort.Export.SelectionAndWholeGraph`, `GraphXPort.Format.Ascii.*`,
-   `GraphXPort.Beautify.*`, and `GraphXPort.Merge.GitStatus.*`.
+   `GraphXPort.Beautify.*`, `GraphXPort.Merge.GitStatus.*`, and
+   `GraphXPort.Merge.GitHistory.*`.
 3. Verify export output remains deterministic.
 4. For menu changes, manually verify the Blueprint node context submenu in the
    Unreal Editor when practical. For Beautify changes, manually verify in a

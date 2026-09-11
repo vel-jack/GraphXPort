@@ -142,4 +142,53 @@ bool FGraphXPortGitStatusRenameTest::RunTest(const FString& Parameters)
     return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGraphXPortGitStatusStagedTest, "GraphXPort.Merge.GitStatus.StagedChanges",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGraphXPortGitStatusStagedTest::RunTest(const FString& Parameters)
+{
+    TArray<FString> Lines;
+    Lines.Add(OrdinaryLine(TEXT("M."), TEXT("Content/StagedOnly.uasset")));
+    Lines.Add(OrdinaryLine(TEXT("MM"), TEXT("Content/StagedAndModified.uasset")));
+    Lines.Add(OrdinaryLine(TEXT("A."), TEXT("Content/StagedAdd.uasset")));
+    Lines.Add(OrdinaryLine(TEXT(".M"), TEXT("Content/WorktreeOnly.uasset")));
+    Lines.Add(RenameLine(TEXT("R."), TEXT("Content/NewName.uasset"), TEXT("Content/OldName.uasset")));
+    Lines.Add(UnmergedLine(TEXT("UU"), TEXT("Content/Conflict.uasset")));
+
+    TArray<FGraphXPortGitFileEntry> Unstaged;
+    TArray<FGraphXPortGitFileEntry> Staged;
+    FGraphXPortGitStatus::ParseStatusOutput(FString::Join(Lines, TEXT("\n")), Unstaged, Staged);
+
+    // X is the index column, so it is the one reported for a staged entry.
+    const FGraphXPortGitFileEntry* StagedOnly = FindEntry(Staged, TEXT("Content/StagedOnly.uasset"));
+    if (TestNotNull(TEXT("Staged-only entry is in the staged list"), StagedOnly))
+    {
+        TestEqual(TEXT("Staged status comes from the index column"), StagedOnly->StatusCode, TEXT('M'));
+        TestTrue(TEXT("Staged entry is marked as staged"), StagedOnly->Source == EGraphXPortChangeSource::Staged);
+    }
+
+    // Staged and then edited again: two different diffs, so it belongs in both lists.
+    TestNotNull(TEXT("Staged-and-modified is in the staged list"), FindEntry(Staged, TEXT("Content/StagedAndModified.uasset")));
+    TestNotNull(TEXT("Staged-and-modified is in the unstaged list"), FindEntry(Unstaged, TEXT("Content/StagedAndModified.uasset")));
+
+    const FGraphXPortGitFileEntry* Added = FindEntry(Staged, TEXT("Content/StagedAdd.uasset"));
+    if (TestNotNull(TEXT("Staged add is listed"), Added))
+    {
+        TestEqual(TEXT("Staged add status code"), Added->StatusCode, TEXT('A'));
+    }
+
+    // HEAD still has the file under its old name, which is where the "before" side lives.
+    const FGraphXPortGitFileEntry* Renamed = FindEntry(Staged, TEXT("Content/NewName.uasset"));
+    if (TestNotNull(TEXT("Staged rename is listed under its new path"), Renamed))
+    {
+        TestEqual(TEXT("Staged rename keeps the original path"), Renamed->OriginalPath, FString(TEXT("Content/OldName.uasset")));
+        TestEqual(TEXT("Before path is the original path"), Renamed->BeforePath(), FString(TEXT("Content/OldName.uasset")));
+    }
+
+    TestNull(TEXT("Worktree-only change is not staged"), FindEntry(Staged, TEXT("Content/WorktreeOnly.uasset")));
+    TestNull(TEXT("An unresolved conflict is not staged"), FindEntry(Staged, TEXT("Content/Conflict.uasset")));
+    TestEqual(TEXT("Staged list size"), Staged.Num(), 4);
+    return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

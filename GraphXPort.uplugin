@@ -5,13 +5,15 @@
   "FriendlyName": "GraphXPort",
   "Description": "Exports Blueprint graph selections and complete graphs to portable AI text, JSON, ASCII, and Mermaid formats, and resolves Blueprint git conflicts side by side in the GraphXPort Merge window.",
   "Category": "Blueprints",
-  "CreatedBy": "vel-jack",
+  "CreatedBy": "Velmurugan",
   "CreatedByURL": "https://github.com/vel-jack",
   "DocsURL": "https://github.com/vel-jack/GraphXPort",
   "SupportURL": "https://github.com/vel-jack/GraphXPort/issues",
+  "MarketplaceURL": "",
   "CanContainContent": false,
   "IsBetaVersion": true,
   "Installed": false,
+  "EnabledByDefault": true,
   "Modules": [
     {
       "Name": "GraphXPort",

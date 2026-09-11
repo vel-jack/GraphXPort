@@ -45,3 +45,35 @@ bool FGraphXPortGitBlob::ExtractBlobToFile(const FString& RepoRoot, const FStrin
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(DestFilePath), /*Tree=*/true);
     return FFileHelper::SaveArrayToFile(Blob, *DestFilePath);
 }
+
+bool FGraphXPortGitBlob::GetBlobId(const FString& RepoRoot, const FString& RefSpec, const FString& RepoRelativePath, FString& OutId)
+{
+    using namespace GraphXPortGitBlobPrivate;
+
+    int32 ReturnCode = -1;
+    const FString Args = FString::Printf(TEXT("rev-parse --verify --quiet \"%s:%s\""), *RefSpec, *NormalizeForGit(RepoRelativePath));
+    if (!FGraphXPortGitProcess::RunText(Args, RepoRoot, OutId, ReturnCode) || ReturnCode != 0)
+    {
+        OutId.Empty();
+        return false;
+    }
+
+    OutId.TrimStartAndEndInline();
+    return !OutId.IsEmpty();
+}
+
+bool FGraphXPortGitBlob::HashWorkingFile(const FString& RepoRoot, const FString& RepoRelativePath, FString& OutId)
+{
+    using namespace GraphXPortGitBlobPrivate;
+
+    int32 ReturnCode = -1;
+    const FString Args = FString::Printf(TEXT("hash-object -- \"%s\""), *NormalizeForGit(RepoRelativePath));
+    if (!FGraphXPortGitProcess::RunText(Args, RepoRoot, OutId, ReturnCode) || ReturnCode != 0)
+    {
+        OutId.Empty();
+        return false;
+    }
+
+    OutId.TrimStartAndEndInline();
+    return !OutId.IsEmpty();
+}

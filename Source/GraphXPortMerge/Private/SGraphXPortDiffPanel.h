@@ -26,7 +26,21 @@ enum class EGraphXPortDiffMode : uint8
     /** Deleted in the working tree: only the HEAD copy is available, read-only. */
     SingleReadOnly,
     /** Untracked or newly added: only the real, editable asset, nothing to compare against. */
-    NewFile
+    NewFile,
+    /** Staged or committed change: two historical revisions, both read-only. */
+    ReadOnlyCompare
+};
+
+/** What the Result file on disk currently matches, in a conflict. */
+enum class EGraphXPortResultOrigin : uint8
+{
+    Unknown,
+    /** Identical to git stage 2 - what git leaves in the working tree for a binary conflict. */
+    Mine,
+    /** Identical to git stage 3, after "Use Incoming as Result". */
+    Incoming,
+    /** Differs from both: the user has saved merge work into it. */
+    Merged
 };
 
 /** A row in the differences tree: either a category (a graph, or Variables) or one change. */
@@ -60,9 +74,10 @@ struct FGraphXPortDiffTreeNode
  * Shows the selected file's Blueprint graph(s) side by side using real, native
  * SGraphEditor panes bound to actually-loaded UBlueprint revisions - historical
  * revisions are loaded read-only via the engine's diff loader (see
- * FGraphXPortTempPackage); the "Mine" pane is always the real, live /Game asset so
- * normal Unreal graph editing (including copy/paste between panes) and a normal
- * package save are how conflicts actually get resolved.
+ * FGraphXPortTempPackage). For unstaged changes the Result pane is the real, live /Game
+ * asset, so normal Unreal graph editing (including copy/paste between panes) and a
+ * normal package save are how conflicts actually get resolved. Staged and committed
+ * changes compare two historical revisions and nothing is editable.
  *
  * Changed nodes are highlighted by SGraphEditor itself (via its DiffResults argument).
  * The differences tree - owned here but displayed by the merge window under the file
@@ -118,7 +133,9 @@ private:
 
     void ReleaseLoadedRevisions();
     void RebuildSides();
-    void LoadTempSide(FSideData& Side, const FString& RefSpec);
+    /** RefSpec is anything git accepts before ":path" - a commit, "HEAD", a conflict stage
+     *  (":2"), or empty for the index. */
+    void LoadTempSide(FSideData& Side, const FString& RefSpec, const FString& RepoRelativePath);
     void LoadRealSide(FSideData& Side, bool bEditable);
     void CollectGraphNames();
     void ComputeAllDiffs();
@@ -143,6 +160,9 @@ private:
         return Mode == EGraphXPortDiffMode::Conflict3Way ? MineSide : ResultSide;
     }
 
+    /** Prefix for the local-change rows in the differences tree: MINE, WORKING, STAGED or COMMIT. */
+    FText LocalChangeTag() const;
+
     UEdGraph* FindGraphForSide(const FSideData& Side, FName GraphName) const;
     UEdGraphNode* FindNodeForSide(const FSideData& Side, FName GraphName, const FGuid& NodeGuid) const;
     /** Queues a focus for the next tick. Jumping in the same frame the panes were rebuilt
@@ -164,6 +184,13 @@ private:
     FReply OnSaveAndResolveClicked();
     FReply OnToggleLeftPaneClicked();
     FText GetLeftToggleLabel() const;
+    /** Hashes the working file against stages 2 and 3 to see which side Result matches. */
+    void RefreshResultOrigin();
+    /** Replaces the Result file with Mine (stage 2) or Incoming (stage 3) and reloads it. */
+    FReply OnUseSideAsResultClicked(bool bIncoming);
+    bool CanUseSideAsResult(bool bIncoming) const;
+    FText GetResultOriginText() const;
+    FSlateColor GetResultOriginColor() const;
     /** Compiles the Mine blueprint; false if it finished with errors. */
     bool CompileMine();
     bool SaveMinePackage();
@@ -187,8 +214,10 @@ private:
     FSideData TheirsSide;
     FSideData ResultSide;
 
-    /** The left pane shows Base or Mine; Mine is what you copy from once seeded from Theirs. */
+    /** The left pane shows Base or Mine; Mine is what you copy from once Result is Incoming. */
     bool bLeftShowsMine = false;
+
+    EGraphXPortResultOrigin ResultOrigin = EGraphXPortResultOrigin::Unknown;
 
     TArray<FName> GraphNames;
     FName SelectedGraphName;

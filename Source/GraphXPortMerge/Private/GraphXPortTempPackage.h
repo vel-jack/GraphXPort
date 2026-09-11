@@ -52,6 +52,19 @@ public:
     static bool LoadBlobAsAsset(const FString& RepoRoot, const FString& RefSpec, const FString& RepoRelativePath, FGraphXPortLoadedAsset& OutResult, FString& OutError);
 
     /** Resolves RepoRelativePath to the real, live /Game asset - used for the editable
-     *  "Mine" side, which is never a diff-only copy. */
+     *  Result side, which is never a diff-only copy. */
     static bool ResolveRealAsset(const FString& RepoRoot, const FString& RepoRelativePath, FGraphXPortLoadedAsset& OutResult, FString& OutError);
+
+    /**
+     * Overwrites the working-tree file with <RefSpec>:<RepoRelativePath> and hot-reloads
+     * the live package in place. This is the order the engine's own source-control revert
+     * uses (USourceControlHelpers::ApplyOperationAndReloadPackages): detach the package's
+     * linker so the file is no longer held open, write the file, then ReloadPackages.
+     * Writing while the linker is attached fails because the editor holds the file open.
+     *
+     * Callers MUST have dropped every widget and reference into the live asset first:
+     * reloading replaces its objects. Unsaved in-memory edits are discarded. Refuses a
+     * level that is currently open in the editor.
+     */
+    static bool ReplaceWorkingFileWithRevision(const FString& RepoRoot, const FString& RefSpec, const FString& RepoRelativePath, FString& OutError);
 };

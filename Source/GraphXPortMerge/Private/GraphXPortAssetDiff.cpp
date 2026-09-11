@@ -64,13 +64,12 @@ namespace GraphXPortAssetDiffPrivate
         const UScriptStruct* RowStruct = Table->GetRowStruct();
         const TMap<FName, uint8*>& RowMap = Table->GetRowMap();
 
-        TArray<FName> RowNames;
-        RowMap.GenerateKeyArray(RowNames);
-        RowNames.Sort([](const FName& A, const FName& B) { return A.ToString() < B.ToString(); });
-
-        for (const FName& RowName : RowNames)
+        // RowMap order is the table's authored row order - the same order the Data Table
+        // editor shows and its drag-reorder writes - so it must not be sorted here.
+        for (const TPair<FName, uint8*>& Row : RowMap)
         {
-            uint8* const* RowData = RowMap.Find(RowName);
+            const FName RowName = Row.Key;
+            uint8* const* RowData = &Row.Value;
 
             FGraphXPortAssetEntry Entry;
             Entry.Key = RowName;

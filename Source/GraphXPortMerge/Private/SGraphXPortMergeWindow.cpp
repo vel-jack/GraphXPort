@@ -10,8 +10,34 @@
 
 #define LOCTEXT_NAMESPACE "GraphXPortMerge"
 
+namespace GraphXPortMergeWindowPrivate
+{
+    /** Commits fetched per page; more are loaded on request so a long history stays cheap. */
+    static constexpr int32 HistoryPageSize = 100;
+
+    static const FLinearColor SubduedColor(0.55f, 0.55f, 0.55f);
+    static const FLinearColor HashColor(0.95f, 0.75f, 0.35f);
+
+    static FGraphXPortFileListItemPtr MakeSection()
+    {
+        FGraphXPortFileListItemPtr Section = MakeShared<FGraphXPortFileListItem>();
+        Section->Kind = FGraphXPortFileListItem::EKind::Section;
+        return Section;
+    }
+
+    static FGraphXPortFileListItemPtr MakeFileItem(FGraphXPortGitFileEntry&& Entry)
+    {
+        FGraphXPortFileListItemPtr Item = MakeShared<FGraphXPortFileListItem>();
+        Item->Kind = FGraphXPortFileListItem::EKind::File;
+        Item->File = MakeShared<FGraphXPortGitFileEntry>(MoveTemp(Entry));
+        return Item;
+    }
+}
+
 void SGraphXPortMergeWindow::Construct(const FArguments& InArgs)
 {
+    using namespace GraphXPortMergeWindowPrivate;
+
     const EGraphXPortGitAvailability Availability = FGraphXPortGitStatus::DetectAvailability(RepoRoot);
 
     if (Availability != EGraphXPortGitAvailability::Available)
@@ -22,6 +48,14 @@ void SGraphXPortMergeWindow::Construct(const FArguments& InArgs)
         ];
         return;
     }
+
+    UnstagedSection = MakeSection();
+    StagedSection = MakeSection();
+    HistorySection = MakeSection();
+    RootItems = { UnstagedSection, StagedSection, HistorySection };
+
+    LoadMoreItem = MakeShared<FGraphXPortFileListItem>();
+    LoadMoreItem->Kind = FGraphXPortFileListItem::EKind::LoadMore;
 
     // Built first so its differences tree can be placed under the file list.
     SAssignNew(DiffPanel, SGraphXPortDiffPanel)
@@ -37,12 +71,12 @@ void SGraphXPortMergeWindow::Construct(const FArguments& InArgs)
             SNew(SSplitter)
             .Orientation(Orient_Vertical)
             + SSplitter::Slot()
-            .Value(0.4f)
+            .Value(0.5f)
             [
                 BuildFileListPanel()
             ]
             + SSplitter::Slot()
-            .Value(0.6f)
+            .Value(0.5f)
             [
                 DiffPanel->GetDifferencesTree()
             ]
@@ -85,7 +119,7 @@ TSharedRef<SWidget> SGraphXPortMergeWindow::BuildFileListPanel()
             .VAlign(VAlign_Center)
             [
                 SNew(STextBlock)
-                .Text(LOCTEXT("ChangedFiles", "Changed Files (unstaged)"))
+                .Text(LOCTEXT("Files", "Files"))
                 .Font(FAppStyle::Get().GetFontStyle("BoldFont"))
             ]
             + SHorizontalBox::Slot()
@@ -94,52 +128,204 @@ TSharedRef<SWidget> SGraphXPortMergeWindow::BuildFileListPanel()
             [
                 SNew(SButton)
                 .Text(LOCTEXT("Refresh", "Refresh"))
+                .ToolTipText(LOCTEXT("RefreshTip", "Re-read git status and reload the latest history."))
                 .OnClicked(this, &SGraphXPortMergeWindow::OnRefreshClicked)
             ]
         ]
         + SVerticalBox::Slot()
         .FillHeight(1.f)
         [
-            SAssignNew(FileListView, SListView<FGraphXPortGitFileEntryPtr>)
-            .ListItemsSource(&FileEntries)
+            SAssignNew(FileTreeView, STreeView<FGraphXPortFileListItemPtr>)
+            .TreeItemsSource(&RootItems)
             .OnGenerateRow(this, &SGraphXPortMergeWindow::GenerateFileRow)
+            .OnGetChildren(this, &SGraphXPortMergeWindow::OnGetFileChildren)
             .OnSelectionChanged(this, &SGraphXPortMergeWindow::OnFileSelectionChanged)
+            .OnMouseButtonClick_Lambda([this](FGraphXPortFileListItemPtr Item)
+            {
+                // A click on a commit opens it to show its assets. Handled per click rather
+                // than on selection change, so clicking the same commit again closes it.
+                if (Item.IsValid() && Item->Kind == FGraphXPortFileListItem::EKind::Commit)
+                {
+                    FileTreeView->SetItemExpansion(Item, !FileTreeView->IsItemExpanded(Item));
+                }
+            })
             .SelectionMode(ESelectionMode::Single)
         ];
 }
 
 void SGraphXPortMergeWindow::RefreshFileList()
 {
-    TArray<FGraphXPortGitFileEntry> Entries;
-    FGraphXPortGitStatus::ListUnstagedChanges(RepoRoot, Entries);
+    using namespace GraphXPortMergeWindowPrivate;
 
-    FileEntries.Reset(Entries.Num());
-    for (FGraphXPortGitFileEntry& Entry : Entries)
+    // The diff panel keeps its own reference to the entry it shows, so rebuilding the
+    // list does not disturb what is on screen.
+    TArray<FGraphXPortGitFileEntry> Unstaged;
+    TArray<FGraphXPortGitFileEntry> Staged;
+    FGraphXPortGitStatus::ListChanges(RepoRoot, Unstaged, Staged);
+
+    UnstagedSection->Children.Reset(Unstaged.Num());
+    for (FGraphXPortGitFileEntry& Entry : Unstaged)
     {
-        FileEntries.Add(MakeShared<FGraphXPortGitFileEntry>(MoveTemp(Entry)));
+        UnstagedSection->Children.Add(MakeFileItem(MoveTemp(Entry)));
     }
 
-    if (FileListView.IsValid())
+    StagedSection->Children.Reset(Staged.Num());
+    for (FGraphXPortGitFileEntry& Entry : Staged)
     {
-        FileListView->RequestListRefresh();
+        StagedSection->Children.Add(MakeFileItem(MoveTemp(Entry)));
+    }
+
+    HistorySection->Children.Reset();
+    LoadedCommitCount = 0;
+    bHistoryExhausted = false;
+    LoadMoreHistory();
+
+    if (FileTreeView.IsValid())
+    {
+        for (const FGraphXPortFileListItemPtr& Root : RootItems)
+        {
+            FileTreeView->SetItemExpansion(Root, true);
+        }
+        FileTreeView->RequestTreeRefresh();
     }
 }
 
-TSharedRef<ITableRow> SGraphXPortMergeWindow::GenerateFileRow(FGraphXPortGitFileEntryPtr Entry, const TSharedRef<STableViewBase>& OwnerTable)
+void SGraphXPortMergeWindow::LoadMoreHistory()
 {
-    return SNew(STableRow<FGraphXPortGitFileEntryPtr>, OwnerTable)
-        [
-            SNew(SHorizontalBox)
+    using namespace GraphXPortMergeWindowPrivate;
+
+    HistorySection->Children.Remove(LoadMoreItem);
+
+    TArray<FGraphXPortGitCommit> Commits;
+    FGraphXPortGitHistory::ListCommits(RepoRoot, LoadedCommitCount, HistoryPageSize, Commits);
+
+    for (FGraphXPortGitCommit& Commit : Commits)
+    {
+        FGraphXPortFileListItemPtr CommitItem = MakeShared<FGraphXPortFileListItem>();
+        CommitItem->Kind = FGraphXPortFileListItem::EKind::Commit;
+        for (FGraphXPortGitFileEntry& File : Commit.Files)
+        {
+            CommitItem->Children.Add(MakeFileItem(MoveTemp(File)));
+        }
+        Commit.Files.Reset();
+        CommitItem->Commit = MakeShared<FGraphXPortGitCommit>(MoveTemp(Commit));
+        HistorySection->Children.Add(CommitItem);
+    }
+
+    LoadedCommitCount += Commits.Num();
+    bHistoryExhausted = Commits.Num() < HistoryPageSize;
+    if (!bHistoryExhausted)
+    {
+        HistorySection->Children.Add(LoadMoreItem);
+    }
+
+    UpdateSectionLabels();
+
+    if (FileTreeView.IsValid())
+    {
+        FileTreeView->RequestTreeRefresh();
+    }
+}
+
+void SGraphXPortMergeWindow::UpdateSectionLabels()
+{
+    UnstagedSection->Label = FText::Format(LOCTEXT("UnstagedSection", "Unstaged Changes ({0})"),
+        FText::AsNumber(UnstagedSection->Children.Num()));
+    StagedSection->Label = FText::Format(LOCTEXT("StagedSection", "Staged Changes ({0})"),
+        FText::AsNumber(StagedSection->Children.Num()));
+    HistorySection->Label = bHistoryExhausted
+        ? FText::Format(LOCTEXT("HistorySectionAll", "History ({0})"), FText::AsNumber(LoadedCommitCount))
+        : FText::Format(LOCTEXT("HistorySectionSome", "History (latest {0})"), FText::AsNumber(LoadedCommitCount));
+}
+
+TSharedRef<ITableRow> SGraphXPortMergeWindow::GenerateFileRow(FGraphXPortFileListItemPtr Item, const TSharedRef<STableViewBase>& OwnerTable)
+{
+    using namespace GraphXPortMergeWindowPrivate;
+
+    TSharedPtr<SWidget> Content;
+
+    switch (Item->Kind)
+    {
+    case FGraphXPortFileListItem::EKind::Section:
+    {
+        // Bound rather than copied so the count updates when more history is loaded.
+        Content = SNew(STextBlock)
+            .Text_Lambda([Item]() { return Item->Label; })
+            .Font(FAppStyle::Get().GetFontStyle("BoldFont"));
+        break;
+    }
+
+    case FGraphXPortFileListItem::EKind::Commit:
+    {
+        const FGraphXPortGitCommit& Commit = *Item->Commit;
+        Content = SNew(SHorizontalBox)
+            .ToolTipText(BuildCommitTooltip(Commit))
             + SHorizontalBox::Slot()
             .AutoWidth()
-            .Padding(6.f, 2.f)
+            .Padding(0.f, 1.f, 8.f, 1.f)
+            [
+                SNew(STextBlock)
+                .Text(FText::FromString(Commit.ShortHash))
+                .ColorAndOpacity(FSlateColor(HashColor))
+            ]
+            + SHorizontalBox::Slot()
+            .FillWidth(1.f)
+            .Padding(0.f, 1.f, 8.f, 1.f)
+            [
+                SNew(STextBlock)
+                .Text(FText::FromString(Commit.Subject))
+                .OverflowPolicy(ETextOverflowPolicy::Ellipsis)
+            ]
+            + SHorizontalBox::Slot()
+            .AutoWidth()
+            .Padding(0.f, 1.f, 6.f, 1.f)
+            [
+                SNew(STextBlock)
+                .Text(FText::Format(LOCTEXT("CommitMeta", "{0}  {1}"),
+                    FText::FromString(Commit.Author), FText::FromString(Commit.Date)))
+                .ColorAndOpacity(FSlateColor(SubduedColor))
+            ];
+        break;
+    }
+
+    case FGraphXPortFileListItem::EKind::LoadMore:
+    {
+        Content = SNew(SBox)
+            .HAlign(HAlign_Left)
+            .Padding(2.f)
+            [
+                SNew(SButton)
+                .Text(LOCTEXT("LoadMore", "Load more commits"))
+                .OnClicked_Lambda([this]()
+                {
+                    LoadMoreHistory();
+                    return FReply::Handled();
+                })
+            ];
+        break;
+    }
+
+    case FGraphXPortFileListItem::EKind::File:
+    default:
+    {
+        const FGraphXPortGitFileEntry& Entry = *Item->File;
+        const FText Tooltip = Entry.OriginalPath.IsEmpty()
+            ? FText::FromString(Entry.RepoRelativePath)
+            : FText::Format(LOCTEXT("RenamedTip", "{0}\nrenamed from {1}"),
+                FText::FromString(Entry.RepoRelativePath), FText::FromString(Entry.OriginalPath));
+
+        Content = SNew(SHorizontalBox)
+            .ToolTipText(Tooltip)
+            + SHorizontalBox::Slot()
+            .AutoWidth()
+            .Padding(2.f, 1.f)
             [
                 SNew(SBox)
-                .WidthOverride(24.f)
+                .WidthOverride(22.f)
                 [
                     SNew(STextBlock)
-                    .Text(StatusCodeToLabel(Entry->StatusCode))
-                    .ColorAndOpacity(StatusCodeToColor(Entry->StatusCode))
+                    .Text(StatusCodeToLabel(Entry.StatusCode))
+                    .ColorAndOpacity(StatusCodeToColor(Entry.StatusCode))
                     .Font(FAppStyle::Get().GetFontStyle("BoldFont"))
                 ]
             ]
@@ -147,9 +333,25 @@ TSharedRef<ITableRow> SGraphXPortMergeWindow::GenerateFileRow(FGraphXPortGitFile
             .VAlign(VAlign_Center)
             [
                 SNew(STextBlock)
-                .Text(FText::FromString(Entry->RepoRelativePath))
-            ]
+                .Text(FText::FromString(Entry.RepoRelativePath))
+                .OverflowPolicy(ETextOverflowPolicy::Ellipsis)
+            ];
+        break;
+    }
+    }
+
+    return SNew(STableRow<FGraphXPortFileListItemPtr>, OwnerTable)
+        [
+            Content.ToSharedRef()
         ];
+}
+
+void SGraphXPortMergeWindow::OnGetFileChildren(FGraphXPortFileListItemPtr Item, TArray<FGraphXPortFileListItemPtr>& OutChildren)
+{
+    if (Item.IsValid())
+    {
+        OutChildren = Item->Children;
+    }
 }
 
 FReply SGraphXPortMergeWindow::OnRefreshClicked()
@@ -158,40 +360,48 @@ FReply SGraphXPortMergeWindow::OnRefreshClicked()
     return FReply::Handled();
 }
 
-void SGraphXPortMergeWindow::OnFileSelectionChanged(FGraphXPortGitFileEntryPtr SelectedEntry, ESelectInfo::Type SelectInfo)
+void SGraphXPortMergeWindow::OnFileSelectionChanged(FGraphXPortFileListItemPtr SelectedItem, ESelectInfo::Type SelectInfo)
 {
+    // Sections and commits are not files; the panes keep showing the last file selected.
+    if (SelectedItem.IsValid() && SelectedItem->Kind == FGraphXPortFileListItem::EKind::File && DiffPanel.IsValid())
+    {
+        DiffPanel->SetFile(RepoRoot, SelectedItem->File);
+    }
+}
+
+void SGraphXPortMergeWindow::ClearSelectedFile()
+{
+    if (FileTreeView.IsValid())
+    {
+        FileTreeView->ClearSelection();
+    }
     if (DiffPanel.IsValid())
     {
-        DiffPanel->SetFile(RepoRoot, SelectedEntry);
+        DiffPanel->SetFile(RepoRoot, nullptr);
     }
 }
 
 void SGraphXPortMergeWindow::ReleaseRevisions()
 {
-    if (FileListView.IsValid())
-    {
-        FileListView->ClearSelection();
-    }
-    if (DiffPanel.IsValid())
-    {
-        DiffPanel->SetFile(RepoRoot, nullptr);
-    }
+    ClearSelectedFile();
 }
 
 void SGraphXPortMergeWindow::OnFileResolved()
 {
-    // The resolved entry is gone from the unstaged list, so clear the panes before its
-    // backing entry is destroyed.
-    if (FileListView.IsValid())
-    {
-        FileListView->ClearSelection();
-    }
-    if (DiffPanel.IsValid())
-    {
-        DiffPanel->SetFile(RepoRoot, nullptr);
-    }
-
+    // The resolved file moves from Unstaged to Staged, so what the panes show is stale.
+    ClearSelectedFile();
     RefreshFileList();
+}
+
+FText SGraphXPortMergeWindow::BuildCommitTooltip(const FGraphXPortGitCommit& Commit)
+{
+    FString Text = FString::Printf(TEXT("%s  %s\n%s\n%s"),
+        *Commit.ShortHash, *Commit.Author, *Commit.Date, *Commit.Subject);
+    if (!Commit.Body.IsEmpty())
+    {
+        Text += TEXT("\n\n") + Commit.Body;
+    }
+    return FText::FromString(Text);
 }
 
 FText SGraphXPortMergeWindow::StatusCodeToLabel(TCHAR StatusCode)
@@ -211,7 +421,8 @@ FSlateColor SGraphXPortMergeWindow::StatusCodeToColor(TCHAR StatusCode)
     case TEXT('D'):
         return FSlateColor(FLinearColor(0.9f, 0.6f, 0.2f)); // deleted
     case TEXT('R'):
-        return FSlateColor(FLinearColor(0.4f, 0.7f, 0.95f)); // renamed
+    case TEXT('C'):
+        return FSlateColor(FLinearColor(0.4f, 0.7f, 0.95f)); // renamed/copied
     case TEXT('M'):
     default:
         return FSlateColor(FLinearColor(0.85f, 0.85f, 0.3f)); // modified

@@ -43,6 +43,7 @@ namespace GraphXPortDiffPanelPrivate
     static const FLinearColor RemovedColor(0.95f, 0.35f, 0.3f);
     static const FLinearColor ChangedColor(0.9f, 0.75f, 0.25f);
     static const FLinearColor UnchangedColor(0.75f, 0.75f, 0.75f);
+    static const FLinearColor IndexColor(0.5f, 0.5f, 0.5f);
     static const FLinearColor ConflictColor(1.f, 0.42f, 0.15f);
 
     static TMap<FName, USCS_Node*> GatherComponentNodes(const UBlueprint* Blueprint)
@@ -124,6 +125,9 @@ void SGraphXPortDiffPanel::SetFile(const FString& InRepoRoot, TSharedPtr<FGraphX
     Entry = InEntry;
 
     RebuildSides();
+    RefreshResultOrigin();
+    // When Result already holds Incoming, Mine is the side changes get copied from.
+    bLeftShowsMine = ResultOrigin == EGraphXPortResultOrigin::Incoming;
     CollectGraphNames();
     ComputeAllDiffs();
     BuildDiffTree();
@@ -134,6 +138,138 @@ void SGraphXPortDiffPanel::SetFile(const FString& InRepoRoot, TSharedPtr<FGraphX
     {
         StatusText->SetText(FText::GetEmpty());
     }
+}
+
+void SGraphXPortDiffPanel::RefreshResultOrigin()
+{
+    ResultOrigin = EGraphXPortResultOrigin::Unknown;
+    if (Mode != EGraphXPortDiffMode::Conflict3Way || !Entry.IsValid())
+    {
+        return;
+    }
+
+    FString WorkingId;
+    if (!FGraphXPortGitBlob::HashWorkingFile(RepoRoot, Entry->RepoRelativePath, WorkingId))
+    {
+        return;
+    }
+
+    FString MineId;
+    FString TheirsId;
+    FGraphXPortGitBlob::GetBlobId(RepoRoot, TEXT(":2"), Entry->RepoRelativePath, MineId);
+    FGraphXPortGitBlob::GetBlobId(RepoRoot, TEXT(":3"), Entry->RepoRelativePath, TheirsId);
+
+    if (WorkingId == MineId)
+    {
+        ResultOrigin = EGraphXPortResultOrigin::Mine;
+    }
+    else if (WorkingId == TheirsId)
+    {
+        ResultOrigin = EGraphXPortResultOrigin::Incoming;
+    }
+    else
+    {
+        ResultOrigin = EGraphXPortResultOrigin::Merged;
+    }
+}
+
+FText SGraphXPortDiffPanel::GetResultOriginText() const
+{
+    // The hash describes the file on disk; unsaved edits in memory are layered on top.
+    const bool bDirty = ResultSide.Package && ResultSide.Package->IsDirty();
+
+    FText Origin;
+    switch (ResultOrigin)
+    {
+    case EGraphXPortResultOrigin::Mine:     Origin = LOCTEXT("OriginMine", "Result starts from Mine"); break;
+    case EGraphXPortResultOrigin::Incoming: Origin = LOCTEXT("OriginIncoming", "Result starts from Incoming"); break;
+    case EGraphXPortResultOrigin::Merged:   Origin = LOCTEXT("OriginMerged", "Result has saved merge edits"); break;
+    default:                                Origin = LOCTEXT("OriginUnknown", "Result"); break;
+    }
+
+    return bDirty
+        ? FText::Format(LOCTEXT("OriginDirty", "{0} (unsaved edits)"), Origin)
+        : Origin;
+}
+
+FSlateColor SGraphXPortDiffPanel::GetResultOriginColor() const
+{
+    using namespace GraphXPortDiffPanelPrivate;
+
+    if (ResultSide.Package && ResultSide.Package->IsDirty())
+    {
+        return FSlateColor(ChangedColor);
+    }
+    return FSlateColor(ResultOrigin == EGraphXPortResultOrigin::Merged ? ChangedColor : CategoryColor);
+}
+
+bool SGraphXPortDiffPanel::CanUseSideAsResult(bool bIncoming) const
+{
+    const FSideData& Source = bIncoming ? TheirsSide : MineSide;
+    const EGraphXPortResultOrigin Target = bIncoming ? EGraphXPortResultOrigin::Incoming : EGraphXPortResultOrigin::Mine;
+    const bool bDirty = ResultSide.Package && ResultSide.Package->IsDirty();
+
+    // Already identical, with nothing unsaved to throw away: the button would do nothing.
+    return Mode == EGraphXPortDiffMode::Conflict3Way && Source.Asset != nullptr && (ResultOrigin != Target || bDirty);
+}
+
+FReply SGraphXPortDiffPanel::OnUseSideAsResultClicked(bool bIncoming)
+{
+    if (!Entry.IsValid() || !CanUseSideAsResult(bIncoming))
+    {
+        return FReply::Handled();
+    }
+
+    const FText SideName = bIncoming ? LOCTEXT("SideNameIncoming", "Incoming") : LOCTEXT("SideNameMine", "Mine");
+    const bool bLosesWork = ResultOrigin == EGraphXPortResultOrigin::Merged
+        || (ResultSide.Package && ResultSide.Package->IsDirty());
+
+    const FText Warning = bLosesWork
+        ? LOCTEXT("UseSideLoses", "The merge edits already in Result - saved or unsaved - will be lost.\n\n")
+        : FText::GetEmpty();
+
+    const FText Message = FText::Format(
+        LOCTEXT("UseSideConfirm", "Start the Result from {0}?\n\n"
+            "The Result asset on disk is replaced with the {0} version and reloaded. "
+            "Then copy the changes you want to keep from the other side into Result, and "
+            "click Save & Mark Resolved.\n\n{1}Nothing is staged until you click Save & Mark Resolved."),
+        SideName, Warning);
+
+    if (FMessageDialog::Open(EAppMsgType::YesNo, Message) != EAppReturnType::Yes)
+    {
+        return FReply::Handled();
+    }
+
+    // Every pane and reference into the live asset must go before its package is reloaded
+    // underneath it - reloading replaces those objects.
+    const TSharedPtr<FGraphXPortGitFileEntry> CurrentEntry = Entry;
+    ReleaseLoadedRevisions();
+
+    FString Error;
+    const bool bReplaced = FGraphXPortTempPackage::ReplaceWorkingFileWithRevision(
+        RepoRoot, bIncoming ? TEXT(":3") : TEXT(":2"), CurrentEntry->RepoRelativePath, Error);
+
+    SetFile(RepoRoot, CurrentEntry);
+
+    if (StatusText.IsValid())
+    {
+        if (!bReplaced)
+        {
+            StatusText->SetText(FText::Format(LOCTEXT("UseSideFailed", "Could not start from {0}: {1}"), SideName, FText::FromString(Error)));
+        }
+        else if (!Error.IsEmpty())
+        {
+            StatusText->SetText(FText::Format(LOCTEXT("UseSideReloadWarn", "Result replaced with {0}, but reloading reported: {1}"), SideName, FText::FromString(Error)));
+        }
+        else
+        {
+            StatusText->SetText(bIncoming
+                ? LOCTEXT("UseIncomingDone", "Result now holds Incoming. Copy your changes from the Mine pane (left) into Result.")
+                : LOCTEXT("UseMineDone", "Result now holds Mine. Copy the incoming changes from the Theirs pane (right) into Result."));
+        }
+    }
+
+    return FReply::Handled();
 }
 
 void SGraphXPortDiffPanel::ReleaseLoadedRevisions()
@@ -171,11 +307,11 @@ void SGraphXPortDiffPanel::ReleaseLoadedRevisions()
     bLeftShowsMine = false;
 }
 
-void SGraphXPortDiffPanel::LoadTempSide(FSideData& Side, const FString& RefSpec)
+void SGraphXPortDiffPanel::LoadTempSide(FSideData& Side, const FString& RefSpec, const FString& RepoRelativePath)
 {
     FGraphXPortLoadedAsset Loaded;
     FString Error;
-    if (FGraphXPortTempPackage::LoadBlobAsAsset(RepoRoot, RefSpec, Entry->RepoRelativePath, Loaded, Error))
+    if (FGraphXPortTempPackage::LoadBlobAsAsset(RepoRoot, RefSpec, RepoRelativePath, Loaded, Error))
     {
         Side.Asset = Loaded.Asset;
         Side.Blueprint = Loaded.Blueprint;
@@ -226,16 +362,44 @@ void SGraphXPortDiffPanel::RebuildSides()
         return;
     }
 
+    const FString& Path = Entry->RepoRelativePath;
+    const FString& BeforePath = Entry->BeforePath();
+
+    // Staged and committed changes are two historical revisions. Both load as throwaway
+    // diff-only packages, so nothing here can touch the working tree. A side that did not
+    // exist (an add or a delete) simply shows "Not present at this revision".
+    if (Entry->Source != EGraphXPortChangeSource::Unstaged)
+    {
+        Mode = EGraphXPortDiffMode::ReadOnlyCompare;
+
+        if (Entry->Source == EGraphXPortChangeSource::Staged)
+        {
+            BaseSide.Label = LOCTEXT("StagedBefore", "HEAD");
+            LoadTempSide(BaseSide, TEXT("HEAD"), BeforePath);
+            ResultSide.Label = LOCTEXT("StagedAfter", "Staged (index, read-only)");
+            LoadTempSide(ResultSide, FString(), Path);
+        }
+        else
+        {
+            const FText ShortHash = FText::FromString(Entry->CommitHash.Left(7));
+            BaseSide.Label = FText::Format(LOCTEXT("CommitBefore", "Parent of {0}"), ShortHash);
+            LoadTempSide(BaseSide, Entry->CommitHash + TEXT("^"), BeforePath);
+            ResultSide.Label = FText::Format(LOCTEXT("CommitAfter", "{0} (read-only)"), ShortHash);
+            LoadTempSide(ResultSide, Entry->CommitHash, Path);
+        }
+        return;
+    }
+
     switch (Entry->StatusCode)
     {
     case TEXT('U'):
         Mode = EGraphXPortDiffMode::Conflict3Way;
         BaseSide.Label = LOCTEXT("Base", "Base (common ancestor)");
-        LoadTempSide(BaseSide, TEXT(":1"));
+        LoadTempSide(BaseSide, TEXT(":1"), Path);
         MineSide.Label = LOCTEXT("Mine", "Mine (yours)");
-        LoadTempSide(MineSide, TEXT(":2"));
+        LoadTempSide(MineSide, TEXT(":2"), Path);
         TheirsSide.Label = LOCTEXT("Theirs", "Theirs (incoming)");
-        LoadTempSide(TheirsSide, TEXT(":3"));
+        LoadTempSide(TheirsSide, TEXT(":3"), Path);
         ResultSide.Label = LOCTEXT("Result", "Result (editable)");
         LoadRealSide(ResultSide, /*bEditable=*/true);
         break;
@@ -244,7 +408,7 @@ void SGraphXPortDiffPanel::RebuildSides()
     case TEXT('R'):
         Mode = EGraphXPortDiffMode::ModifiedCompare;
         BaseSide.Label = LOCTEXT("Head", "HEAD");
-        LoadTempSide(BaseSide, TEXT("HEAD"));
+        LoadTempSide(BaseSide, TEXT("HEAD"), BeforePath);
         ResultSide.Label = LOCTEXT("Working", "Working tree (editable)");
         LoadRealSide(ResultSide, /*bEditable=*/true);
         break;
@@ -252,7 +416,7 @@ void SGraphXPortDiffPanel::RebuildSides()
     case TEXT('D'):
         Mode = EGraphXPortDiffMode::SingleReadOnly;
         BaseSide.Label = LOCTEXT("HeadDeleted", "HEAD (deleted in working tree)");
-        LoadTempSide(BaseSide, TEXT("HEAD"));
+        LoadTempSide(BaseSide, TEXT("HEAD"), BeforePath);
         break;
 
     case TEXT('A'):
@@ -263,6 +427,23 @@ void SGraphXPortDiffPanel::RebuildSides()
         LoadRealSide(ResultSide, /*bEditable=*/true);
         break;
     }
+}
+
+FText SGraphXPortDiffPanel::LocalChangeTag() const
+{
+    if (Mode == EGraphXPortDiffMode::Conflict3Way)
+    {
+        return LOCTEXT("SideMine", "MINE");
+    }
+    if (Entry.IsValid() && Entry->Source == EGraphXPortChangeSource::Staged)
+    {
+        return LOCTEXT("SideStaged", "STAGED");
+    }
+    if (Entry.IsValid() && Entry->Source == EGraphXPortChangeSource::Commit)
+    {
+        return LOCTEXT("SideCommit", "COMMIT");
+    }
+    return LOCTEXT("SideWorking", "WORKING");
 }
 
 void SGraphXPortDiffPanel::CollectGraphNames()
@@ -459,9 +640,7 @@ void SGraphXPortDiffPanel::AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiff
         }
     };
 
-    const FText MineTag = Mode == EGraphXPortDiffMode::Conflict3Way
-        ? LOCTEXT("SideMine", "MINE")
-        : LOCTEXT("SideWorking", "WORKING");
+    const FText MineTag = LocalChangeTag();
 
     CompareVariables(BaseSide.Blueprint, LocalChangeSide().Blueprint, MineTag, /*bFromTheirs=*/false);
     CompareVariables(BaseSide.Blueprint, TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
@@ -525,9 +704,7 @@ void SGraphXPortDiffPanel::AppendDefaultsDiffs(TArray<TSharedPtr<FGraphXPortDiff
         }
     };
 
-    const FText MineTag = Mode == EGraphXPortDiffMode::Conflict3Way
-        ? LOCTEXT("SideMine", "MINE")
-        : LOCTEXT("SideWorking", "WORKING");
+    const FText MineTag = LocalChangeTag();
 
     CompareDefaults(LocalChangeSide().Blueprint, MineTag, /*bFromTheirs=*/false);
     CompareDefaults(TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
@@ -617,9 +794,7 @@ void SGraphXPortDiffPanel::AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDif
         }
     };
 
-    const FText MineTag = Mode == EGraphXPortDiffMode::Conflict3Way
-        ? LOCTEXT("SideMine", "MINE")
-        : LOCTEXT("SideWorking", "WORKING");
+    const FText MineTag = LocalChangeTag();
 
     CompareComponents(BaseSide.Blueprint, LocalChangeSide().Blueprint, MineTag, /*bFromTheirs=*/false);
     CompareComponents(BaseSide.Blueprint, TheirsSide.Blueprint, LOCTEXT("SideTheirs", "THEIRS"), /*bFromTheirs=*/true);
@@ -678,11 +853,34 @@ void SGraphXPortDiffPanel::AppendEntryDiffs(TArray<TSharedPtr<FGraphXPortDiffTre
                 OutRows.Add(Row);
             }
         }
+
+        // Order is serialized (data table rows, enum values, struct members), so a pure
+        // reorder is a real change even when every entry's value is identical.
+        auto CommonKeyOrder = [](const TArray<FGraphXPortAssetEntry>& From, const TArray<FGraphXPortAssetEntry>& Other)
+        {
+            TArray<FName> Keys;
+            for (const FGraphXPortAssetEntry& Candidate : From)
+            {
+                if (Other.ContainsByPredicate([&Candidate](const FGraphXPortAssetEntry& E) { return E.Key == Candidate.Key; }))
+                {
+                    Keys.Add(Candidate.Key);
+                }
+            }
+            return Keys;
+        };
+
+        if (CommonKeyOrder(Base, Side) != CommonKeyOrder(Side, Base))
+        {
+            TSharedPtr<FGraphXPortDiffTreeNode> Row = MakeShared<FGraphXPortDiffTreeNode>();
+            Row->Label = FText::Format(LOCTEXT("EntryReordered", "{0}: Order changed"), SideTag);
+            Row->Color = ChangedColor;
+            Row->bIsMemberRow = true;
+            Row->bFromTheirs = bFromTheirs;
+            OutRows.Add(Row);
+        }
     };
 
-    const FText MineTag = Mode == EGraphXPortDiffMode::Conflict3Way
-        ? LOCTEXT("SideMine", "MINE")
-        : LOCTEXT("SideWorking", "WORKING");
+    const FText MineTag = LocalChangeTag();
 
     if (LocalChangeSide().Asset)
     {
@@ -727,9 +925,7 @@ void SGraphXPortDiffPanel::AppendGraphPresenceDiffs(FName GraphName, TArray<TSha
         OutRows.Add(Row);
     };
 
-    const FText MineTag = Mode == EGraphXPortDiffMode::Conflict3Way
-        ? LOCTEXT("SideMine", "MINE")
-        : LOCTEXT("SideWorking", "WORKING");
+    const FText MineTag = LocalChangeTag();
 
     ComparePresence(LocalChangeSide(), MineTag);
     ComparePresence(TheirsSide, LOCTEXT("SideTheirs", "THEIRS"));
@@ -741,9 +937,7 @@ void SGraphXPortDiffPanel::BuildDiffTree()
 
     DiffTreeRoots.Reset();
 
-    const FText MineTag = Mode == EGraphXPortDiffMode::Conflict3Way
-        ? LOCTEXT("SideMine", "MINE")
-        : LOCTEXT("SideWorking", "WORKING");
+    const FText MineTag = LocalChangeTag();
 
     // Every change, whatever section it came from, is gathered flat first; the tree is then
     // partitioned into Conflicts / Mine Only / Theirs Only.
@@ -961,7 +1155,7 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildToolbarRow()
         [
             SNew(SButton)
             .Text(LOCTEXT("SaveResolve", "Save && Mark Resolved"))
-            .ToolTipText(LOCTEXT("SaveResolveTip", "Save the merged result you edited in the Mine pane, then stage it so git records the conflict as resolved."))
+            .ToolTipText(LOCTEXT("SaveResolveTip", "Save the merged result you edited in the Result pane, then stage it so git records the conflict as resolved."))
             .Visibility(this, &SGraphXPortDiffPanel::GetConflictActionVisibility)
             .OnClicked(this, &SGraphXPortDiffPanel::OnSaveAndResolveClicked)
             .IsEnabled_Lambda([this]() { return ResultSide.Asset != nullptr && ResultSide.bEditable; })
@@ -976,6 +1170,42 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildToolbarRow()
             .ToolTipText(LOCTEXT("ToggleLeftTip", "Switch the left pane between the common ancestor and your own side."))
             .Visibility(this, &SGraphXPortDiffPanel::GetConflictActionVisibility)
             .OnClicked(this, &SGraphXPortDiffPanel::OnToggleLeftPaneClicked)
+        ]
+        // Which side Result is built on. Pick the side with more changes, then copy the
+        // smaller side's changes into it.
+        + SHorizontalBox::Slot()
+        .AutoWidth()
+        .VAlign(VAlign_Center)
+        .Padding(18.f, 2.f, 6.f, 2.f)
+        [
+            SNew(STextBlock)
+            .Text(this, &SGraphXPortDiffPanel::GetResultOriginText)
+            .ColorAndOpacity(this, &SGraphXPortDiffPanel::GetResultOriginColor)
+            .Visibility(this, &SGraphXPortDiffPanel::GetConflictActionVisibility)
+        ]
+        + SHorizontalBox::Slot()
+        .AutoWidth()
+        .VAlign(VAlign_Center)
+        .Padding(2.f)
+        [
+            SNew(SButton)
+            .Text(LOCTEXT("UseMine", "Start from Mine"))
+            .ToolTipText(LOCTEXT("UseMineTip", "Replace Result with your version (Mine), then copy the incoming changes you want from the Theirs pane. Use this when you changed more than Incoming did.\n\nThis is what Result holds when the conflict starts."))
+            .Visibility(this, &SGraphXPortDiffPanel::GetConflictActionVisibility)
+            .IsEnabled_Lambda([this]() { return CanUseSideAsResult(/*bIncoming=*/false); })
+            .OnClicked(this, &SGraphXPortDiffPanel::OnUseSideAsResultClicked, false)
+        ]
+        + SHorizontalBox::Slot()
+        .AutoWidth()
+        .VAlign(VAlign_Center)
+        .Padding(2.f)
+        [
+            SNew(SButton)
+            .Text(LOCTEXT("UseIncoming", "Start from Incoming"))
+            .ToolTipText(LOCTEXT("UseIncomingTip", "Replace Result with the incoming version (Theirs), then copy your own changes into it from the Mine pane. Use this when Incoming changed more than you did."))
+            .Visibility(this, &SGraphXPortDiffPanel::GetConflictActionVisibility)
+            .IsEnabled_Lambda([this]() { return CanUseSideAsResult(/*bIncoming=*/true); })
+            .OnClicked(this, &SGraphXPortDiffPanel::OnUseSideAsResultClicked, true)
         ]
         + SHorizontalBox::Slot()
         .FillWidth(1.f)
@@ -1008,7 +1238,8 @@ EVisibility SGraphXPortDiffPanel::GetConflictActionVisibility() const
 
 EVisibility SGraphXPortDiffPanel::GetPlainSaveVisibility() const
 {
-    return Mode == EGraphXPortDiffMode::Conflict3Way ? EVisibility::Collapsed : EVisibility::Visible;
+    // Staged, committed and deleted files have nothing editable to save.
+    return Mode != EGraphXPortDiffMode::Conflict3Way && ResultSide.bEditable ? EVisibility::Visible : EVisibility::Collapsed;
 }
 
 TSharedRef<SWidget> SGraphXPortDiffPanel::BuildDiffTreeWidget()
@@ -1512,17 +1743,24 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildEntryListWidget(const FSideData& 
             ];
     };
 
-    // Header row
-    for (int32 ColumnIndex = 0; ColumnIndex < Side.Columns.Num(); ++ColumnIndex)
+    // Column 0 is a 1-based position, like the Data Table editor's leftmost column, so row
+    // order can be compared across panes at a glance. Asset columns start at 1.
+    auto AddHeader = [&Grid, &MakeCell](int32 GridColumn, const FString& Text)
     {
-        Grid->AddSlot(ColumnIndex, 0)
+        Grid->AddSlot(GridColumn, 0)
         [
             SNew(SBorder)
             .BorderImage(FAppStyle::Get().GetBrush("DetailsView.CategoryTop"))
             [
-                MakeCell(Side.Columns[ColumnIndex], CategoryColor, /*bHeader=*/true)
+                MakeCell(Text, CategoryColor, /*bHeader=*/true)
             ]
         ];
+    };
+
+    AddHeader(0, TEXT("#"));
+    for (int32 ColumnIndex = 0; ColumnIndex < Side.Columns.Num(); ++ColumnIndex)
+    {
+        AddHeader(ColumnIndex + 1, Side.Columns[ColumnIndex]);
     }
 
     int32 Row = 1;
@@ -1549,6 +1787,11 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildEntryListWidget(const FSideData& 
             RowColor = AddedColor;
         }
 
+        Grid->AddSlot(0, Row)
+        [
+            MakeCell(FString::FromInt(Row), IndexColor, /*bHeader=*/false)
+        ];
+
         for (int32 ColumnIndex = 0; ColumnIndex < AssetEntry.Cells.Num(); ++ColumnIndex)
         {
             // An unchanged row still highlights the individual cells that differ, so a
@@ -1561,7 +1804,7 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildEntryListWidget(const FSideData& 
                 CellColor = ChangedColor;
             }
 
-            Grid->AddSlot(ColumnIndex, Row)
+            Grid->AddSlot(ColumnIndex + 1, Row)
             [
                 MakeCell(AssetEntry.Cells[ColumnIndex], CellColor, /*bHeader=*/false)
             ];
@@ -1753,6 +1996,7 @@ void SGraphXPortDiffPanel::RebuildPanes()
         ActiveSides.Add({ &TheirsSide, &TheirsPane, &TheirsPaneCommands });
         break;
     case EGraphXPortDiffMode::ModifiedCompare:
+    case EGraphXPortDiffMode::ReadOnlyCompare:
         ActiveSides.Add({ &BaseSide, &LeftPane, &LeftPaneCommands });
         ActiveSides.Add({ &ResultSide, &ResultPane, &ResultPaneCommands });
         break;
