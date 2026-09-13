@@ -4,6 +4,7 @@
 #include "Framework/Docking/TabManager.h"
 #include "GraphXPortTempPackage.h"
 #include "SGraphXPortMergeWindow.h"
+#include "Styling/AppStyle.h"
 #include "Widgets/Docking/SDockTab.h"
 #include "WorkspaceMenuStructure.h"
 #include "WorkspaceMenuStructureModule.h"
@@ -25,7 +26,7 @@ void FGraphXPortMergeModule::StartupModule()
         .SetDisplayName(LOCTEXT("MergeTabTitle", "GraphXPort Merge"))
         .SetTooltipText(LOCTEXT("MergeTabTooltip", "Resolve Blueprint git conflicts side by side."))
         .SetGroup(WorkspaceMenu::GetMenuStructure().GetToolsStructureRoot())
-        .SetIcon(FSlateIcon());
+        .SetIcon(FSlateIcon(FAppStyle::GetAppStyleSetName(), TEXT("Icons.Merge")));
 }
 
 void FGraphXPortMergeModule::ShutdownModule()

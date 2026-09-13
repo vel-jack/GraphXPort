@@ -48,13 +48,6 @@ bool FGraphXPortExportTest::RunTest(const FString& Parameters)
     TestEqual(TEXT("Selection contains one internal edge"), Selection.Edges.Num(), 1);
     TestEqual(TEXT("Selection records one external link"), Selection.ExternalLinks.Num(), 1);
 
-    const FString JsonA = FGraphXPortFormatter::Format(Selection, EGraphXPortFormat::Json);
-    const FString JsonB = FGraphXPortFormatter::Format(Selection, EGraphXPortFormat::Json);
-    TestEqual(TEXT("JSON is deterministic"), JsonA, JsonB);
-    TestTrue(TEXT("JSON identifies GraphXPort"), JsonA.Contains(TEXT("\"generator\": \"GraphXPort\"")));
-    TestTrue(TEXT("JSON declares canonical format version 1"), JsonA.Contains(TEXT("\"formatVersion\": 1")));
-    TestTrue(TEXT("JSON preserves node-relative pin order"), JsonA.Contains(TEXT("\"nodePinOrder\": 0")));
-
     const FString Mermaid = FGraphXPortFormatter::Format(Selection, EGraphXPortFormat::Mermaid);
     TestTrue(TEXT("Mermaid output declares a flowchart"), Mermaid.StartsWith(TEXT("flowchart LR")));
     TestTrue(TEXT("Mermaid output includes an execution edge"), Mermaid.Contains(TEXT("-->")));

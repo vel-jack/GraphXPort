@@ -1,20 +1,15 @@
 #include "GraphXPortMenu.h"
 
 #include "BlueprintEditor.h"
-#include "DesktopPlatformModule.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/Blueprint.h"
-#include "Framework/Application/SlateApplication.h"
 #include "Framework/Notifications/NotificationManager.h"
 #include "GraphXPortBeautifier.h"
 #include "GraphXPortSerializer.h"
 #include "HAL/PlatformApplicationMisc.h"
-#include "IDesktopPlatform.h"
 #include "Kismet2/KismetEditorUtilities.h"
-#include "Misc/FileHelper.h"
-#include "Misc/Paths.h"
 #include "ScopedTransaction.h"
 #include "ToolMenu.h"
 #include "ToolMenuSection.h"
@@ -74,11 +69,6 @@ namespace
             Result.Add(ClickedNode);
         }
         return Result;
-    }
-
-    FString SafeFileBase(const FGraphXPortDocument& Document)
-    {
-        return FPaths::MakeValidFileName(Document.BlueprintName + TEXT("_") + Document.GraphName + TEXT("_") + Document.Scope);
     }
 
     bool NodeHasExecPin(const UEdGraphNode* Node)
@@ -157,24 +147,24 @@ void FGraphXPortMenu::PopulateSubmenu(UToolMenu* Menu)
     FToolMenuSection& Section = Menu->AddSection(TEXT("GraphXPortActions"));
 
     const auto AddAction = [&](const FName Name, const FText& Label, const FText& Tooltip,
-        const EGraphXPortFormat Format, const bool bEntireGraph, const bool bSaveFile)
+        const EGraphXPortFormat Format, const bool bEntireGraph)
     {
         Section.AddMenuEntry(Name, Label, Tooltip, FSlateIcon(), FUIAction(FExecuteAction::CreateLambda(
-            [Blueprint, Graph, Node, Format, bEntireGraph, bSaveFile]()
+            [Blueprint, Graph, Node, Format, bEntireGraph]()
             {
-                Export(Blueprint.Get(), Graph.Get(), Node.Get(), Format, bEntireGraph, bSaveFile);
+                Export(Blueprint.Get(), Graph.Get(), Node.Get(), Format, bEntireGraph);
             })));
     };
 
     AddAction(TEXT("CopyAiText"), LOCTEXT("CopyAiText", "Copy Selection for AI"),
         LOCTEXT("CopyAiTextTip", "Copy compact Markdown describing the selected nodes and their connections."),
-        EGraphXPortFormat::AiText, false, false);
+        EGraphXPortFormat::AiText, false);
     AddAction(TEXT("CopyAscii"), LOCTEXT("CopyAscii", "Copy Selection as ASCII Flow"),
         LOCTEXT("CopyAsciiTip", "Copy a concise text diagram of the selected flow."),
-        EGraphXPortFormat::Ascii, false, false);
+        EGraphXPortFormat::Ascii, false);
     AddAction(TEXT("CopyMermaid"), LOCTEXT("CopyMermaid", "Copy Selection as Mermaid"),
         LOCTEXT("CopyMermaidTip", "Copy a Mermaid flowchart generated from the selected nodes."),
-        EGraphXPortFormat::Mermaid, false, false);
+        EGraphXPortFormat::Mermaid, false);
     Section.AddMenuEntry(TEXT("BeautifySelection"),
         LOCTEXT("BeautifySelection", "Beautify Selection"),
         LOCTEXT("BeautifySelectionTip", "Rearrange the selected nodes left-to-right by execution flow, anchored on the node you right-clicked. Select one node to format its whole downstream chain, or select several to arrange just those. Undoable; does not change pins or connections."),
@@ -184,10 +174,7 @@ void FGraphXPortMenu::PopulateSubmenu(UToolMenu* Menu)
     Section.AddSeparator(TEXT("GraphScopeSeparator"));
     AddAction(TEXT("CopyGraphAiText"), LOCTEXT("CopyGraphAiText", "Copy Entire Graph for AI"),
         LOCTEXT("CopyGraphAiTextTip", "Copy every node and connection in the current function, event, macro, or graph."),
-        EGraphXPortFormat::AiText, true, false);
-    AddAction(TEXT("ExportGraphJson"), LOCTEXT("ExportGraphJson", "Export Entire Graph to File..."),
-        LOCTEXT("ExportGraphJsonTip", "Save the complete current graph as a .graphx.json file."),
-        EGraphXPortFormat::Json, true, true);
+        EGraphXPortFormat::AiText, true);
 }
 
 void FGraphXPortMenu::Export(
@@ -195,8 +182,7 @@ void FGraphXPortMenu::Export(
     const UEdGraph* Graph,
     const UEdGraphNode* ClickedNode,
     const EGraphXPortFormat Format,
-    const bool bEntireGraph,
-    const bool bSaveFile)
+    const bool bEntireGraph)
 {
     if (Blueprint == nullptr || Graph == nullptr)
     {
@@ -216,38 +202,9 @@ void FGraphXPortMenu::Export(
     }
 
     const FString Output = FGraphXPortFormatter::Format(Document, Format);
-    if (!bSaveFile)
-    {
-        FPlatformApplicationMisc::ClipboardCopy(*Output);
-        Notify(FText::Format(LOCTEXT("Copied", "GraphXPort copied {0} nodes and {1} connections."),
-            FText::AsNumber(Document.Nodes.Num()), FText::AsNumber(Document.Edges.Num())), SNotificationItem::CS_Success);
-        return;
-    }
-
-    const FString DefaultDirectory = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("GraphXPort"));
-    IFileManager::Get().MakeDirectory(*DefaultDirectory, true);
-    const FString DefaultFilename = SafeFileBase(Document) + TEXT(".") + FGraphXPortFormatter::Extension(Format);
-    TArray<FString> OutputFiles;
-    IDesktopPlatform* DesktopPlatform = FDesktopPlatformModule::Get();
-    const void* ParentWindow = FSlateApplication::Get().FindBestParentWindowHandleForDialogs(nullptr);
-    if (DesktopPlatform == nullptr || !DesktopPlatform->SaveFileDialog(
-        ParentWindow,
-        TEXT("Export GraphXPort Flow"),
-        DefaultDirectory,
-        DefaultFilename,
-        FGraphXPortFormatter::FileFilter(Format),
-        EFileDialogFlags::None,
-        OutputFiles) || OutputFiles.IsEmpty())
-    {
-        return;
-    }
-
-    if (!FFileHelper::SaveStringToFile(Output, *OutputFiles[0], FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM))
-    {
-        Notify(LOCTEXT("SaveFailed", "GraphXPort could not write the selected file."), SNotificationItem::CS_Fail);
-        return;
-    }
-    Notify(FText::FromString(TEXT("GraphXPort exported: ") + OutputFiles[0]), SNotificationItem::CS_Success);
+    FPlatformApplicationMisc::ClipboardCopy(*Output);
+    Notify(FText::Format(LOCTEXT("Copied", "GraphXPort copied {0} nodes and {1} connections."),
+        FText::AsNumber(Document.Nodes.Num()), FText::AsNumber(Document.Edges.Num())), SNotificationItem::CS_Success);
 }
 
 void FGraphXPortMenu::Beautify(const UBlueprint* Blueprint, const UEdGraph* Graph, const UEdGraphNode* ClickedNode)

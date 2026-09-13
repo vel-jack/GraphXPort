@@ -1,32 +1,8 @@
 #include "GraphXPortFormatter.h"
 #include "GraphXPortAsciiFormatter.h"
 
-#include "Dom/JsonObject.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
-
 namespace
 {
-    TSharedRef<FJsonObject> PinJson(const FGraphXPortPin& Pin)
-    {
-        TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
-        Json->SetNumberField(TEXT("nodePinOrder"), Pin.NodePinOrder);
-        Json->SetStringField(TEXT("id"), Pin.Id);
-        Json->SetStringField(TEXT("name"), Pin.Name);
-        Json->SetStringField(TEXT("direction"), Pin.Direction);
-        Json->SetStringField(TEXT("category"), Pin.Category);
-        Json->SetStringField(TEXT("subCategory"), Pin.SubCategory);
-        Json->SetStringField(TEXT("containerType"), Pin.ContainerType);
-        Json->SetStringField(TEXT("typeObjectPath"), Pin.TypeObjectPath);
-        Json->SetStringField(TEXT("defaultValue"), Pin.DefaultValue);
-        Json->SetStringField(TEXT("defaultObjectPath"), Pin.DefaultObjectPath);
-        Json->SetStringField(TEXT("defaultText"), Pin.DefaultText);
-        Json->SetBoolField(TEXT("hidden"), Pin.bHidden);
-        Json->SetBoolField(TEXT("advancedView"), Pin.bAdvancedView);
-        Json->SetBoolField(TEXT("orphaned"), Pin.bOrphaned);
-        return Json;
-    }
-
     FString OneLine(FString Value)
     {
         Value.ReplaceInline(TEXT("\r"), TEXT(" "));
@@ -57,106 +33,8 @@ FString FGraphXPortFormatter::Format(const FGraphXPortDocument& Document, const 
     case EGraphXPortFormat::AiText: return ToAiText(Document);
     case EGraphXPortFormat::Ascii: return ToAscii(Document);
     case EGraphXPortFormat::Mermaid: return ToMermaid(Document);
-    default: return ToJson(Document);
+    default: return ToAiText(Document);
     }
-}
-
-FString FGraphXPortFormatter::Extension(const EGraphXPortFormat FormatType)
-{
-    switch (FormatType)
-    {
-    case EGraphXPortFormat::AiText: return TEXT("graphx.md");
-    case EGraphXPortFormat::Ascii: return TEXT("graphx.txt");
-    case EGraphXPortFormat::Mermaid: return TEXT("graphx.mmd");
-    default: return TEXT("graphx.json");
-    }
-}
-
-FString FGraphXPortFormatter::FileFilter(const EGraphXPortFormat FormatType)
-{
-    switch (FormatType)
-    {
-    case EGraphXPortFormat::AiText: return TEXT("GraphXPort AI text (*.graphx.md)|*.graphx.md");
-    case EGraphXPortFormat::Ascii: return TEXT("GraphXPort ASCII (*.graphx.txt)|*.graphx.txt");
-    case EGraphXPortFormat::Mermaid: return TEXT("GraphXPort Mermaid (*.graphx.mmd)|*.graphx.mmd");
-    default: return TEXT("GraphXPort JSON (*.graphx.json)|*.graphx.json");
-    }
-}
-
-FString FGraphXPortFormatter::ToJson(const FGraphXPortDocument& Document)
-{
-    TSharedRef<FJsonObject> Root = MakeShared<FJsonObject>();
-    Root->SetNumberField(TEXT("formatVersion"), Document.FormatVersion);
-    Root->SetStringField(TEXT("generator"), TEXT("GraphXPort"));
-    Root->SetStringField(TEXT("blueprintPath"), Document.BlueprintPath);
-    Root->SetStringField(TEXT("blueprintName"), Document.BlueprintName);
-    Root->SetStringField(TEXT("graphName"), Document.GraphName);
-    Root->SetStringField(TEXT("graphId"), Document.GraphId);
-    Root->SetStringField(TEXT("scope"), Document.Scope);
-
-    TArray<TSharedPtr<FJsonValue>> Nodes;
-    for (const FGraphXPortNode& Node : Document.Nodes)
-    {
-        TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
-        Json->SetStringField(TEXT("id"), Node.Id);
-        Json->SetStringField(TEXT("name"), Node.Name);
-        Json->SetStringField(TEXT("classPath"), Node.ClassPath);
-        Json->SetStringField(TEXT("title"), Node.Title);
-        Json->SetStringField(TEXT("comment"), Node.Comment);
-        Json->SetStringField(TEXT("memberName"), Node.MemberName);
-        Json->SetStringField(TEXT("memberParentPath"), Node.MemberParentPath);
-        Json->SetStringField(TEXT("macroGraphPath"), Node.MacroGraphPath);
-        TSharedRef<FJsonObject> Position = MakeShared<FJsonObject>();
-        Position->SetNumberField(TEXT("x"), Node.PositionX);
-        Position->SetNumberField(TEXT("y"), Node.PositionY);
-        Json->SetObjectField(TEXT("position"), Position);
-        TArray<TSharedPtr<FJsonValue>> Pins;
-        for (const FGraphXPortPin& Pin : Node.Pins)
-        {
-            Pins.Add(MakeShared<FJsonValueObject>(PinJson(Pin)));
-        }
-        Json->SetArrayField(TEXT("pins"), Pins);
-        Nodes.Add(MakeShared<FJsonValueObject>(Json));
-    }
-    Root->SetArrayField(TEXT("nodes"), Nodes);
-
-    TArray<TSharedPtr<FJsonValue>> Edges;
-    for (const FGraphXPortEdge& Edge : Document.Edges)
-    {
-        TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
-        Json->SetStringField(TEXT("sourceNodeId"), Edge.SourceNodeId);
-        Json->SetStringField(TEXT("sourcePinId"), Edge.SourcePinId);
-        Json->SetStringField(TEXT("sourcePinName"), Edge.SourcePinName);
-        Json->SetStringField(TEXT("targetNodeId"), Edge.TargetNodeId);
-        Json->SetStringField(TEXT("targetPinId"), Edge.TargetPinId);
-        Json->SetStringField(TEXT("targetPinName"), Edge.TargetPinName);
-        Json->SetStringField(TEXT("kind"), Edge.Kind);
-        Edges.Add(MakeShared<FJsonValueObject>(Json));
-    }
-    Root->SetArrayField(TEXT("edges"), Edges);
-
-    TArray<TSharedPtr<FJsonValue>> ExternalLinks;
-    for (const FGraphXPortExternalLink& Link : Document.ExternalLinks)
-    {
-        TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
-        Json->SetStringField(TEXT("localNodeId"), Link.LocalNodeId);
-        Json->SetStringField(TEXT("localPinId"), Link.LocalPinId);
-        Json->SetStringField(TEXT("localPinName"), Link.LocalPinName);
-        Json->SetStringField(TEXT("direction"), Link.Direction);
-        Json->SetStringField(TEXT("externalNodeId"), Link.ExternalNodeId);
-        Json->SetStringField(TEXT("externalNodeTitle"), Link.ExternalNodeTitle);
-        Json->SetStringField(TEXT("externalNodeClassPath"), Link.ExternalNodeClassPath);
-        Json->SetStringField(TEXT("externalPinId"), Link.ExternalPinId);
-        Json->SetStringField(TEXT("externalPinName"), Link.ExternalPinName);
-        ExternalLinks.Add(MakeShared<FJsonValueObject>(Json));
-    }
-    Root->SetArrayField(TEXT("externalLinks"), ExternalLinks);
-
-    FString Output;
-    const TSharedRef<TJsonWriter<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>> Writer =
-        TJsonWriterFactory<TCHAR, TPrettyJsonPrintPolicy<TCHAR>>::Create(&Output);
-    FJsonSerializer::Serialize(Root, Writer);
-    return Output;
 }
 
 FString FGraphXPortFormatter::ToAiText(const FGraphXPortDocument& Document)

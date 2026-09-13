@@ -308,14 +308,12 @@ bool FGraphXPortAsciiEngineNodesTest::RunTest(const FString& Parameters)
         for (UEdGraphPin* Pin : Node->Pins)
             if (Pin) Algo::Reverse(Pin->LinkedTo);
     FGraphXPortSerializer::BuildSelection(Blueprint, Graph, Selection, B, Error);
-    TestEqual(TEXT("Serializer canonical JSON is independent of selection, graph-array and link order"),
-        FGraphXPortFormatter::Format(A, EGraphXPortFormat::Json), FGraphXPortFormatter::Format(B, EGraphXPortFormat::Json));
     TestEqual(TEXT("Serializer tree is independent of selection order"),
         FGraphXPortFormatter::Format(A, EGraphXPortFormat::Ascii), FGraphXPortFormatter::Format(B, EGraphXPortFormat::Ascii));
     FGraphXPortDocument ReorderedGraph;
     FGraphXPortSerializer::BuildGraph(Blueprint, Graph, ReorderedGraph, Error);
-    TestEqual(TEXT("Whole-graph JSON is independent of graph-array and link order"),
-        FGraphXPortFormatter::Format(Doc, EGraphXPortFormat::Json), FGraphXPortFormatter::Format(ReorderedGraph, EGraphXPortFormat::Json));
+    TestEqual(TEXT("Whole-graph ASCII is independent of graph-array and link order"),
+        FGraphXPortFormatter::Format(Doc, EGraphXPortFormat::Ascii), FGraphXPortFormatter::Format(ReorderedGraph, EGraphXPortFormat::Ascii));
     return true;
 }
 

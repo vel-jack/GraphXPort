@@ -7,7 +7,7 @@ GraphXPort is a standalone Unreal Editor plugin for exporting Blueprint graph fl
 1. Open a Blueprint graph.
 2. Select one or more nodes.
 3. Right-click a selected node and open **GraphXPort**.
-4. Copy the selection as AI text, compact ASCII, or Mermaid, export the entire graph as a `.graphx.json` snapshot, or beautify the selected nodes' layout.
+4. Copy the selection or entire graph as AI text, compact ASCII, or Mermaid, or beautify the selected nodes' layout.
 
 The submenu can also copy or export the entire current function, event, macro, or graph.
 
@@ -58,10 +58,23 @@ editors: Base / Mine / Result / Theirs for a conflict, HEAD / Working for an
 ordinary edit. Changed nodes are highlighted by the engine's own diff rendering.
 Staged and History views are read-only.
 
-A differences tree lists every change - graph nodes, variables, class defaults,
-and components - and clicking one jumps the panes to it. Selecting a non-graph
-difference swaps the panes to a member list with a Details panel, so a changed
-tooltip, tag, or default value is visible rather than just named.
+A single Unreal-style navigation tree groups changes directly under **My
+Blueprint**, **Defaults**, **Class Settings**, **Components**, and each graph.
+There is no duplicate member inventory or separate Changes tree. Unchanged
+graphs, functions and macros remain accessible, including in newly added assets.
+My Blueprint uses Unreal's native member browser with variable types, functions,
+macros, dispatchers and local variables; the other sections use native details
+and component widgets. Graph panes include a selection inspector.
+
+Search the file list or review tree, enable **Changes only**, and use **Prev/Next**
+to navigate visible differences. **Refresh Comparison** recomputes the loaded
+asset comparison (including unsaved Result edits); file **Refresh** reloads git
+status and the selected comparison. **Vertical / Horizontal** changes the pane
+layout. Revision labels appear once above each pane.
+
+Member metadata, class settings and graph inspectors are read-only. Working
+Result graphs and default/component details retain their existing edit support;
+all historical revisions remain read-only.
 
 Only the **Result** pane is editable. You merge by hand: select nodes in any pane,
 copy, and paste into Result, then edit or delete as needed. **Save & Mark Resolved**
@@ -79,16 +92,18 @@ uses real Branch, Sequence, Switch and macro-instance classes with transient
 loop interface definitions; real project assets still need a manual export
 check.
 
+Merge tests cover git status/history parsing and
+`GraphXPort.Merge.Navigation.BlueprintReview` covers new-Blueprint graph discovery,
+section routing, unique navigation, search and changes-only filtering.
+
 For DSM, build `AR_GIS_MAPEditor Win64 Development`. If Unreal Editor must not be
 run or hot-reloaded, use compile-only flags `-NoLink -NoHotReload
 -NoHotReloadFromIDE`. This does not build a new loadable DLL or execute automation;
 a normal build and an explicit test run remain necessary before using the changes.
 
-Canonical format version 1 includes `nodePinOrder` on pins so renderers and future structural comparisons can preserve semantic execution-output order without depending on selection or UObject iteration order.
-
 ## Scope
 
-Export is read-only. Two features intentionally write: **Beautify**, which only
+Copy/export inspection is read-only. Two features intentionally write: **Beautify**, which only
 ever changes node position within your own selection, and **GraphXPort Merge**,
 which saves the working-tree asset you edited and stages it. Historical revisions
 shown for comparison are always read-only and are never written back.

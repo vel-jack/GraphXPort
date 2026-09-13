@@ -3,6 +3,7 @@
 #include "SGraphXPortDiffPanel.h"
 #include "Styling/AppStyle.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SSearchBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SSplitter.h"
@@ -66,23 +67,23 @@ void SGraphXPortMergeWindow::Construct(const FArguments& InArgs)
         SNew(SSplitter)
         .Orientation(Orient_Horizontal)
         + SSplitter::Slot()
-        .Value(0.28f)
+        .Value(0.23f)
         [
             SNew(SSplitter)
             .Orientation(Orient_Vertical)
             + SSplitter::Slot()
-            .Value(0.5f)
+            .Value(0.35f)
             [
                 BuildFileListPanel()
             ]
             + SSplitter::Slot()
-            .Value(0.5f)
+            .Value(0.65f)
             [
                 DiffPanel->GetDifferencesTree()
             ]
         ]
         + SSplitter::Slot()
-        .Value(0.72f)
+        .Value(0.77f)
         [
             DiffPanel.ToSharedRef()
         ]
@@ -132,11 +133,16 @@ TSharedRef<SWidget> SGraphXPortMergeWindow::BuildFileListPanel()
                 .OnClicked(this, &SGraphXPortMergeWindow::OnRefreshClicked)
             ]
         ]
+        + SVerticalBox::Slot().AutoHeight().Padding(6.f, 2.f, 6.f, 6.f)
+        [
+            SNew(SSearchBox).HintText(LOCTEXT("SearchFiles", "Search assets or commits"))
+            .OnTextChanged_Lambda([this](const FText& Text) { FileFilter = Text.ToString(); FilterFiles(); })
+        ]
         + SVerticalBox::Slot()
         .FillHeight(1.f)
         [
             SAssignNew(FileTreeView, STreeView<FGraphXPortFileListItemPtr>)
-            .TreeItemsSource(&RootItems)
+            .TreeItemsSource(&VisibleRoots)
             .OnGenerateRow(this, &SGraphXPortMergeWindow::GenerateFileRow)
             .OnGetChildren(this, &SGraphXPortMergeWindow::OnGetFileChildren)
             .OnSelectionChanged(this, &SGraphXPortMergeWindow::OnFileSelectionChanged)
@@ -220,6 +226,7 @@ void SGraphXPortMergeWindow::LoadMoreHistory()
     }
 
     UpdateSectionLabels();
+    FilterFiles();
 
     if (FileTreeView.IsValid())
     {
@@ -350,13 +357,31 @@ void SGraphXPortMergeWindow::OnGetFileChildren(FGraphXPortFileListItemPtr Item, 
 {
     if (Item.IsValid())
     {
-        OutChildren = Item->Children;
+        if (const auto* Children = VisibleFileChildren.Find(Item.Get())) OutChildren = *Children;
     }
 }
 
 FReply SGraphXPortMergeWindow::OnRefreshClicked()
 {
+    const FGraphXPortGitFileEntryPtr Previous = SelectedFile;
     RefreshFileList();
+    if (Previous.IsValid())
+    {
+        // Restore the exact comparison, not another entry for the same path in the index.
+        TFunction<FGraphXPortFileListItemPtr(const TArray<FGraphXPortFileListItemPtr>&)> Find;
+        Find = [&](const TArray<FGraphXPortFileListItemPtr>& Items) -> FGraphXPortFileListItemPtr
+        {
+            for (const auto& Item : Items)
+            {
+                if (Item->File && Item->File->RepoRelativePath == Previous->RepoRelativePath &&
+                    Item->File->Source == Previous->Source && Item->File->CommitHash == Previous->CommitHash) return Item;
+                if (auto Match = Find(Item->Children)) return Match;
+            }
+            return nullptr;
+        };
+        if (auto Match = Find(RootItems)) FileTreeView->SetSelection(Match);
+        else if (Previous->Source != EGraphXPortChangeSource::Commit) ClearSelectedFile();
+    }
     return FReply::Handled();
 }
 
@@ -365,12 +390,14 @@ void SGraphXPortMergeWindow::OnFileSelectionChanged(FGraphXPortFileListItemPtr S
     // Sections and commits are not files; the panes keep showing the last file selected.
     if (SelectedItem.IsValid() && SelectedItem->Kind == FGraphXPortFileListItem::EKind::File && DiffPanel.IsValid())
     {
-        DiffPanel->SetFile(RepoRoot, SelectedItem->File);
+        SelectedFile = SelectedItem->File;
+        DiffPanel->SetFile(RepoRoot, SelectedFile);
     }
 }
 
 void SGraphXPortMergeWindow::ClearSelectedFile()
 {
+    SelectedFile.Reset();
     if (FileTreeView.IsValid())
     {
         FileTreeView->ClearSelection();
@@ -427,6 +454,33 @@ FSlateColor SGraphXPortMergeWindow::StatusCodeToColor(TCHAR StatusCode)
     default:
         return FSlateColor(FLinearColor(0.85f, 0.85f, 0.3f)); // modified
     }
+}
+
+
+void SGraphXPortMergeWindow::FilterFiles()
+{
+    VisibleRoots.Reset();
+    VisibleFileChildren.Reset();
+    TFunction<bool(const FGraphXPortFileListItemPtr&, bool)> Filter;
+    Filter = [&](const FGraphXPortFileListItemPtr& Item, bool bParentMatches)
+    {
+        FString SearchText = Item->Label.ToString();
+        if (Item->File) SearchText = Item->File->RepoRelativePath;
+        if (Item->Commit) SearchText = BuildCommitTooltip(*Item->Commit).ToString();
+        const bool bMatches = bParentMatches || FileFilter.IsEmpty() || SearchText.Contains(FileFilter);
+        TArray<FGraphXPortFileListItemPtr> Children;
+        for (const auto& Child : Item->Children)
+            if (Filter(Child, bMatches)) Children.Add(Child);
+        const bool bVisible = bMatches || !Children.IsEmpty() ||
+            Item->Kind == FGraphXPortFileListItem::EKind::LoadMore;
+        VisibleFileChildren.Add(Item.Get(), MoveTemp(Children));
+        if (bVisible && FileTreeView.IsValid() && !FileFilter.IsEmpty())
+            FileTreeView->SetItemExpansion(Item, true);
+        return bVisible;
+    };
+    for (const auto& Root : RootItems)
+        if (Filter(Root, false)) VisibleRoots.Add(Root);
+    if (FileTreeView.IsValid()) FileTreeView->RequestTreeRefresh();
 }
 
 #undef LOCTEXT_NAMESPACE

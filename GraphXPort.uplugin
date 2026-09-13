@@ -3,7 +3,7 @@
   "Version": 2,
   "VersionName": "0.2.0",
   "FriendlyName": "GraphXPort",
-  "Description": "Exports Blueprint graph selections and complete graphs to portable AI text, JSON, ASCII, and Mermaid formats, and resolves Blueprint git conflicts side by side in the GraphXPort Merge window.",
+  "Description": "Copies Blueprint graph selections and complete graphs to AI text, ASCII, and Mermaid formats, and resolves Blueprint git conflicts side by side in the GraphXPort Merge window.",
   "Category": "Blueprints",
   "CreatedBy": "Velmurugan",
   "CreatedByURL": "https://github.com/vel-jack",

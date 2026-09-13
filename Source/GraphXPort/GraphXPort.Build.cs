@@ -19,7 +19,6 @@ public class GraphXPort : ModuleRules
             "BlueprintGraph",
             "DesktopPlatform",
             "GraphEditor",
-            "Json",
             "Kismet",
             "Projects",
             "Slate",

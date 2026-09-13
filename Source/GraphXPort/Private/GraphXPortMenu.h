@@ -16,6 +16,6 @@ public:
 
 private:
     static void Export(const UBlueprint* Blueprint, const UEdGraph* Graph, const UEdGraphNode* ClickedNode,
-        EGraphXPortFormat Format, bool bEntireGraph, bool bSaveFile);
+        EGraphXPortFormat Format, bool bEntireGraph);
     static void Beautify(const UBlueprint* Blueprint, const UEdGraph* Graph, const UEdGraphNode* ClickedNode);
 };

@@ -37,14 +37,15 @@ The plugin ships two editor modules:
 
 ## Current Scope
 
-GraphXPort currently exports selected nodes or the entire active graph as:
+GraphXPort currently converts selected nodes or the entire active graph into an
+internal document and copies views of it as:
 
-- canonical `.graphx.json`
+- structured in-memory graph document for the formatters
 - AI-oriented Markdown
 - ASCII flow text
 - Mermaid flowchart text
 
-Selection exports must include:
+Selection views must include:
 
 - Blueprint and graph identity
 - nodes and pins
@@ -65,7 +66,7 @@ Keep responsibilities separated:
   applying Beautify's computed positions inside an undo transaction.
 - `GraphXPortSerializer` converts Unreal graph objects into the canonical model.
 - `GraphXPortDocument` defines the canonical in-memory representation.
-- `GraphXPortFormatter` renders JSON, Markdown, ASCII, and Mermaid.
+- `GraphXPortFormatter` renders Markdown, ASCII, and Mermaid.
 - `GraphXPortBeautifier` computes a Beautify layout (node -> target position)
   from live `UEdGraphNode`/`UEdGraphPin` data. It only reads graph state and
   returns positions; it never mutates a node itself.
@@ -121,12 +122,13 @@ Two traps in `SGraphXPortDiffPanel` that cost real debugging time:
   centres against nothing and appears to do nothing. `RequestJumpToNode` defers
   through an active timer.
 
-## Canonical Format
+## Internal Graph Document
 
-The canonical document is the source of truth. Other formats are views of that
-document, not independent graph parsers.
+The in-memory graph document is the source of truth for the copy formatters.
+Markdown, ASCII, and Mermaid are views of that document, not independent graph
+parsers.
 
-Canonical output must be:
+The internal document must be:
 
 - deterministic for the same graph state
 - structured and machine-readable
@@ -252,13 +254,13 @@ Future import or merge operations must be:
 - non-destructive by default
 - blocked from silently overwriting user graph changes
 
-Never deserialize arbitrary UObject classes from an export file without a
-strict allowlist and validation.
+Never deserialize arbitrary UObject classes from external data without a strict
+allowlist and validation.
 
 ## Conflict Workflow
 
 This shipped differently from the original canonical-snapshot plan, and
-deliberately so: rather than diffing `.graphx.json` and replaying a merge plan,
+deliberately so: rather than diffing exported snapshots and replaying a merge plan,
 the merge window loads the actual Blueprint revisions and shows them in real
 `SGraphEditor` panes, so comparison and editing use the engine's own graph
 rendering and editing rather than a reimplementation.
@@ -282,18 +284,25 @@ Current behaviour:
   the graphs: variables (added/removed/retyped/default changed), class defaults
   and component templates (via `DiffUtils::CompareUnrelatedObjects`), components
   (added/removed/class changed), and graphs present on only one side.
-- Selecting a non-graph difference swaps the panes to a member list plus a real
-  `IDetailsView` of the relevant component or the class defaults, so changed
-  values are visible rather than merely named.
+- Navigation uses typed destinations (`EGraphXPortView`), never localized labels.
+  The flat roots are My Blueprint, Defaults, Class Settings, Components, and each
+  graph; differences appear directly under their section, without a duplicate
+  inventory/Changes tree. Keep unchanged and new-asset graphs accessible.
+- Native public `SMyBlueprint`, `SKismetInspector`, `FDetailsDiff`, and `FSCSDiff`
+  provide Unreal-style panes. Member metadata/class settings/graph inspectors
+  are read-only; Result default/component details retain editing. Guard FSCSDiff
+  construction for non-actor or missing generated classes. Retain native widget
+  owners per side and release them after pane teardown, before revision references.
+- Search and Changes only filter the same row identities; Prev/Next navigates
+  differences, not inferred conflicts. Placeholders are never counted as changes.
 - Enums, structs and data tables have no graphs and render as a column grid with
   per-cell change highlighting.
-- The tree lists **Mine Changes** and **Theirs Changes** only. Selecting a row
-  focuses every pane on that node, each resolving it by `NodeGuid` in its own
-  revision.
+- Change rows retain their Mine/Theirs origin. Selecting a graph change focuses
+  every pane on that node, each resolving it by `NodeGuid` in its own revision.
 - Merging is done by hand: copy nodes from any pane, paste into Result only.
 
 Diffs compare semantic graph identity, node properties, pin defaults, and edges
-rather than raw JSON text or node screen positions.
+rather than exported text or node screen positions.
 
 **There is deliberately no automatic conflict detection.** It was built twice and
 removed twice. First by matching `FDiffSingleResult::DisplayString`, which is
@@ -309,8 +318,9 @@ Do not reintroduce conflict analysis, Previous/Next Conflict navigation, or a
 Conflicts section without explicit sign-off. The user's stated preference is to
 see both sides' changes and decide by hand.
 
-The canonical `.graphx.json` model is still the export format, and is not used by
-the merge path.
+The shared graph document is used only as an internal source for the copy
+formatters. The merge path operates on real Unreal assets and does not consume
+copied output.
 
 ## Coding Standards
 

@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "DiffResults.h"
+#include "DiffUtils.h"
 #include "GraphXPortAssetDiff.h"
 #include "GraphXPortGitStatus.h"
 #include "UObject/GCObject.h"
@@ -15,6 +16,16 @@ class UPackage;
 class FUICommandList;
 class SBox;
 class SGraphEditor;
+class SMyBlueprint;
+class SKismetInspector;
+class FSCSDiff;
+class IDetailsView;
+
+/** Explicit destinations; navigation never depends on localized category labels. */
+enum class EGraphXPortView : uint8
+{
+    MyBlueprint, Defaults, ClassSettings, Components, Graph, Entries
+};
 
 enum class EGraphXPortDiffMode : uint8
 {
@@ -46,6 +57,10 @@ enum class EGraphXPortResultOrigin : uint8
 /** A row in the differences tree: either a category (a graph, or Variables) or one change. */
 struct FGraphXPortDiffTreeNode
 {
+    EGraphXPortView View = EGraphXPortView::MyBlueprint;
+    FName Icon;
+    FPropertySoftPath PropertyPath;
+    bool bIsDifference = false;
     FText Label;
     FLinearColor Color = FLinearColor::White;
     bool bIsCategory = false;
@@ -63,6 +78,8 @@ struct FGraphXPortDiffTreeNode
     bool bCanJump = false;
     /** Which section this row came from: a graph name, or Variables/Components/Defaults. */
     FText CategoryLabel;
+    /** Member identity used to attach variable changes to the single variable row. */
+    FName MemberName;
     /** The node to focus. Each pane resolves it in its own revision, so a row holds no
      *  pointer into one particular revision's graph. */
     FGuid NodeGuid;
@@ -105,6 +122,7 @@ public:
     virtual FString GetReferencerName() const override { return TEXT("SGraphXPortDiffPanel"); }
 
 private:
+    friend class FGraphXPortNavigationTest;
     struct FSideData
     {
         FText Label;
@@ -120,6 +138,11 @@ private:
         /** Populated for entry-based kinds (enum, struct, data table). */
         TArray<FGraphXPortAssetEntry> Entries;
         TArray<FString> Columns;
+        // Native widgets must be destroyed before their revision objects are released.
+        TSharedPtr<SMyBlueprint> MyBlueprint;
+        TSharedPtr<SKismetInspector> Inspector;
+        TSharedPtr<FSCSDiff> Components;
+        TSharedPtr<IDetailsView> Details;
     };
 
     /** Per-graph diff results, computed once per file so the tree can list every graph. */
@@ -141,10 +164,17 @@ private:
     void ComputeAllDiffs();
     void AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendDefaultsDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
+    void AppendClassSettingsDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendComponentDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendEntryDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendGraphPresenceDiffs(FName GraphName, TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void BuildDiffTree();
+    void FilterNavigation();
+    FReply NavigateDifference(int32 Direction);
+    FReply RefreshComparison();
+    FReply ToggleOrientation();
+    void EnsureInspector(FSideData& Side);
+    void ReleaseSideWidgets();
     /** Assembles the Mine / Theirs sections from the gathered rows. */
     void PartitionRowsIntoTree(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& AllRows);
     void ApplySelectedGraphDiffResults();
@@ -170,8 +200,8 @@ private:
      *  against yet. */
     void RequestJumpToNode(FName GraphName, const FGuid& NodeGuid);
     EActiveTimerReturnType HandlePendingJump(double InCurrentTime, float InDeltaTime);
-    TSharedRef<SWidget> BuildSideWidget(const FSideData& Side, TSharedPtr<SGraphEditor>& OutPane, TSharedPtr<FUICommandList>& OutCommands);
-    TSharedRef<SWidget> BuildMembersWidget(const FSideData& Side) const;
+    TSharedRef<SWidget> BuildSideWidget(FSideData& Side, TSharedPtr<SGraphEditor>& OutPane, TSharedPtr<FUICommandList>& OutCommands);
+    TSharedRef<SWidget> BuildMembersWidget(FSideData& Side);
     TSharedRef<SWidget> BuildEntryListWidget(const FSideData& Side) const;
     TSharedRef<SWidget> BuildToolbarRow();
     TSharedRef<SWidget> BuildDiffTreeWidget();
@@ -222,12 +252,20 @@ private:
     TArray<FName> GraphNames;
     FName SelectedGraphName;
     /** True while a non-graph difference is selected: panes show member lists, not graphs. */
-    bool bShowMembers = false;
+    EGraphXPortView CurrentView = EGraphXPortView::MyBlueprint;
+    FName InspectedMemberName;
+    FPropertySoftPath InspectedProperty;
+    bool bVerticalPanes = false;
     /** Object shown in the member view's details panel: a component, or the class defaults. */
     FName InspectedComponentName;
     TMap<FName, FGraphDiffSet> GraphDiffs;
 
     TArray<TSharedPtr<FGraphXPortDiffTreeNode>> DiffTreeRoots;
+    TArray<TSharedPtr<FGraphXPortDiffTreeNode>> VisibleTreeRoots;
+    TArray<TSharedPtr<FGraphXPortDiffTreeNode>> VisibleDifferences;
+    TMap<const FGraphXPortDiffTreeNode*, TArray<TSharedPtr<FGraphXPortDiffTreeNode>>> VisibleChildren;
+    FString NavigationFilter;
+    bool bChangesOnly = false;
     TSharedPtr<STreeView<TSharedPtr<FGraphXPortDiffTreeNode>>> DiffTreeView;
     TSharedPtr<SWidget> DiffTreeWidget;
 

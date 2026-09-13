@@ -56,6 +56,7 @@ private:
     void RefreshFileList();
     void LoadMoreHistory();
     void UpdateSectionLabels();
+    void FilterFiles();
 
     TSharedRef<ITableRow> GenerateFileRow(FGraphXPortFileListItemPtr Item, const TSharedRef<STableViewBase>& OwnerTable);
     void OnGetFileChildren(FGraphXPortFileListItemPtr Item, TArray<FGraphXPortFileListItemPtr>& OutChildren);
@@ -72,6 +73,10 @@ private:
     FString RepoRoot;
 
     TArray<FGraphXPortFileListItemPtr> RootItems;
+    TArray<FGraphXPortFileListItemPtr> VisibleRoots;
+    TMap<const FGraphXPortFileListItem*, TArray<FGraphXPortFileListItemPtr>> VisibleFileChildren;
+    FString FileFilter;
+    FGraphXPortGitFileEntryPtr SelectedFile;
     FGraphXPortFileListItemPtr UnstagedSection;
     FGraphXPortFileListItemPtr StagedSection;
     FGraphXPortFileListItemPtr HistorySection;
