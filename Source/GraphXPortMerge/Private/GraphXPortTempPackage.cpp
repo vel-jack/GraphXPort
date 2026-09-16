@@ -8,6 +8,7 @@
 #include "Engine/World.h"
 #include "GraphXPortGitBlob.h"
 #include "HAL/FileManager.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/Guid.h"
 #include "Misc/PackageName.h"
 #include "Misc/PackagePath.h"
@@ -149,6 +150,15 @@ bool FGraphXPortTempPackage::LoadBlobAsAsset(const FString& RepoRoot, const FStr
 
     OutResult.Package = LoadedPackage;
     ClassifyPackageAsset(LoadedPackage, OutResult, OutError);
+
+    // A revision loads with compile-on-load disabled, so it has no skeleton class - and
+    // SMyBlueprint lists variables, functions and dispatchers off the skeleton, so without
+    // this a revision's My Blueprint panel comes up empty while the working copy fills in.
+    // The engine's own Blueprint diff does the same for the same reason (SBlueprintDiff).
+    if (OutResult.Blueprint && !OutResult.Blueprint->SkeletonGeneratedClass)
+    {
+        FKismetEditorUtilities::GenerateBlueprintSkeleton(OutResult.Blueprint);
+    }
 
     return OutResult.IsValid();
 }
