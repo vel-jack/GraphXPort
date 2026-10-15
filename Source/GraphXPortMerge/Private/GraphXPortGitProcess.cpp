@@ -2,7 +2,7 @@
 
 #include "HAL/PlatformProcess.h"
 
-bool FGraphXPortGitProcess::Run(const FString& Args, const FString& WorkingDirectory, TArray<uint8>& OutStdOut, int32& OutReturnCode)
+bool FGraphXPortGitProcess::Run(const FString& Args, const FString& WorkingDirectory, TArray<uint8>& OutStdOut, int32& OutReturnCode, const TArray<uint8>* InStdIn)
 {
     OutStdOut.Reset();
     OutReturnCode = -1;
@@ -14,6 +14,14 @@ bool FGraphXPortGitProcess::Run(const FString& Args, const FString& WorkingDirec
         return false;
     }
 
+    void* InputReadPipe = nullptr;
+    void* InputWritePipe = nullptr;
+    if (InStdIn && !FPlatformProcess::CreatePipe(InputReadPipe, InputWritePipe, /*bWritePipeLocal=*/true))
+    {
+        FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
+        return false;
+    }
+
     FProcHandle Proc = FPlatformProcess::CreateProc(
         TEXT("git"), *Args,
         /*bLaunchDetached=*/true,
@@ -22,12 +30,23 @@ bool FGraphXPortGitProcess::Run(const FString& Args, const FString& WorkingDirec
         /*OutProcessID=*/nullptr,
         /*PriorityModifier=*/0,
         WorkingDirectory.IsEmpty() ? nullptr : *WorkingDirectory,
-        WritePipe);
+        WritePipe,
+        InputReadPipe);
 
     if (!Proc.IsValid())
     {
         FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
+        if (InStdIn) FPlatformProcess::ClosePipe(InputReadPipe, InputWritePipe);
         return false;
+    }
+
+    bool bInputWritten = true;
+    if (InStdIn)
+    {
+        int32 Written = 0;
+        bInputWritten = FPlatformProcess::WritePipe(InputWritePipe, InStdIn->GetData(), InStdIn->Num(), &Written)
+            && Written == InStdIn->Num();
+        FPlatformProcess::ClosePipe(InputReadPipe, InputWritePipe);
     }
 
     // Drain while the process runs: a .uasset easily exceeds the pipe buffer, and a full
@@ -54,7 +73,7 @@ bool FGraphXPortGitProcess::Run(const FString& Args, const FString& WorkingDirec
     FPlatformProcess::CloseProc(Proc);
     FPlatformProcess::ClosePipe(ReadPipe, WritePipe);
 
-    return true;
+    return bInputWritten;
 }
 
 bool FGraphXPortGitProcess::RunText(const FString& Args, const FString& WorkingDirectory, FString& OutStdOut, int32& OutReturnCode)

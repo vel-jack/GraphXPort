@@ -4,10 +4,12 @@
 #include "SGraphXPortDiffPanel.h"
 #include "Engine/Blueprint.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphNode.h"
 #include "EdGraphSchema_K2.h"
 #include "Engine/BlueprintGeneratedClass.h"
 #include "GameFramework/Actor.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "UObject/Package.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGraphXPortNavigationTest, "GraphXPort.Merge.Navigation.BlueprintReview",
     EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -15,6 +17,32 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGraphXPortNavigationTest, "GraphXPort.Merge.Na
 bool FGraphXPortNavigationTest::RunTest(const FString& Parameters)
 {
     const TSharedRef<SGraphXPortDiffPanel> Panel = SNew(SGraphXPortDiffPanel);
+    const FString TestRoot = TEXT("/Temp/GraphXPortMerge/") + FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    UPackage* OldPackage = CreatePackage(*(TestRoot + TEXT("/Old/WBP_FolderButton")));
+    UPackage* NewPackage = CreatePackage(*(TestRoot + TEXT("/New/WBP_FolderButton")));
+    UEdGraphNode* OldNode = NewObject<UEdGraphNode>(GetTransientPackage());
+    UEdGraphNode* NewNode = NewObject<UEdGraphNode>(GetTransientPackage());
+    UEdGraphPin* OldPin = OldNode->CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Class, TEXT("Class"));
+    UEdGraphPin* NewPin = NewNode->CreatePin(EGPD_Input, UEdGraphSchema_K2::PC_Class, TEXT("Class"));
+    OldPin->DefaultObject = NewObject<UBlueprintGeneratedClass>(OldPackage, TEXT("WBP_FolderButton_C"));
+    NewPin->DefaultObject = NewObject<UBlueprintGeneratedClass>(NewPackage, TEXT("WBP_FolderButton_C"));
+    FDiffSingleResult PinChange;
+    PinChange.Diff = EDiffType::PIN_DEFAULT_VALUE;
+    PinChange.Pin1 = OldPin;
+    PinChange.Pin2 = NewPin;
+    SGraphXPortDiffPanel::FSideData OldSide, NewSide;
+    OldSide.Package = OldPackage;
+    OldSide.bIsTemp = true;
+    NewSide.Package = NewPackage;
+    NewSide.bIsTemp = true;
+    TArray<FDiffSingleResult> PinChanges{PinChange};
+    SGraphXPortDiffPanel::RemoveRevisionClassPinDefaults(PinChanges, OldSide, NewSide);
+    TestTrue(TEXT("Revision package paths do not appear as pin changes"), PinChanges.IsEmpty());
+    NewPin->DefaultObject = NewObject<UBlueprintGeneratedClass>(NewPackage, TEXT("DifferentClass_C"));
+    PinChanges.Add(PinChange);
+    SGraphXPortDiffPanel::RemoveRevisionClassPinDefaults(PinChanges, OldSide, NewSide);
+    TestEqual(TEXT("A real class default change remains visible"), PinChanges.Num(), 1);
+
     UBlueprint* Blueprint = NewObject<UBlueprint>(GetTransientPackage(), NAME_None, RF_Transient);
     auto Graph = [Blueprint](const TCHAR* Name)
     {

@@ -59,6 +59,8 @@ private:
     void FilterFiles();
 
     TSharedRef<ITableRow> GenerateFileRow(FGraphXPortFileListItemPtr Item, const TSharedRef<STableViewBase>& OwnerTable);
+    TSharedPtr<SWidget> BuildFileContextMenu();
+    void OpenWorkingAsset(FGraphXPortGitFileEntryPtr Entry, bool bShowInBrowser);
     void OnGetFileChildren(FGraphXPortFileListItemPtr Item, TArray<FGraphXPortFileListItemPtr>& OutChildren);
     FReply OnRefreshClicked();
     void OnFileSelectionChanged(FGraphXPortFileListItemPtr SelectedItem, ESelectInfo::Type SelectInfo);

@@ -2,6 +2,23 @@
 
 #include "Misc/AutomationTest.h"
 #include "GraphXPortGitStatus.h"
+#include "GraphXPortGitProcess.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FGraphXPortGitProcessInputTest, "GraphXPort.Merge.GitProcess.BinaryInput",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FGraphXPortGitProcessInputTest::RunTest(const FString& Parameters)
+{
+    const TArray<uint8> Input{ 'h', 'e', 'l', 'l', 'o' };
+    TArray<uint8> Output;
+    int32 ReturnCode = -1;
+    TestTrue(TEXT("Git accepts piped input"), FGraphXPortGitProcess::Run(TEXT("hash-object --stdin"), FString(), Output, ReturnCode, &Input));
+    TestEqual(TEXT("Git exits successfully"), ReturnCode, 0);
+    static const ANSICHAR Expected[] = "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0";
+    TestTrue(TEXT("Piped bytes reach git unchanged"), Output.Num() >= UE_ARRAY_COUNT(Expected) - 1
+        && FMemory::Memcmp(Output.GetData(), Expected, UE_ARRAY_COUNT(Expected) - 1) == 0);
+    return true;
+}
 
 namespace
 {

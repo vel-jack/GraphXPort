@@ -4,7 +4,7 @@
 #include "Engine/DataTable.h"
 #include "Engine/LevelScriptBlueprint.h"
 #include "Engine/UserDefinedEnum.h"
-#include "Engine/UserDefinedStruct.h"
+#include "StructUtils/UserDefinedStruct.h"
 #include "Kismet2/StructureEditorUtils.h"
 #include "UObject/UnrealType.h"
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"

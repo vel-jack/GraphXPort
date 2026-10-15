@@ -15,6 +15,6 @@
 class FGraphXPortGitProcess
 {
 public:
-    static bool Run(const FString& Args, const FString& WorkingDirectory, TArray<uint8>& OutStdOut, int32& OutReturnCode);
+    static bool Run(const FString& Args, const FString& WorkingDirectory, TArray<uint8>& OutStdOut, int32& OutReturnCode, const TArray<uint8>* InStdIn = nullptr);
     static bool RunText(const FString& Args, const FString& WorkingDirectory, FString& OutStdOut, int32& OutReturnCode);
 };

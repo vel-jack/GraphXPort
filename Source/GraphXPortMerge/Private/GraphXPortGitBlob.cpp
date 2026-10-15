@@ -7,6 +7,13 @@
 
 namespace GraphXPortGitBlobPrivate
 {
+    static bool IsLfsPointer(const TArray<uint8>& Blob)
+    {
+        static const ANSICHAR Prefix[] = "version https://git-lfs.github.com/spec/v1\n";
+        return Blob.Num() >= UE_ARRAY_COUNT(Prefix) - 1
+            && FMemory::Memcmp(Blob.GetData(), Prefix, UE_ARRAY_COUNT(Prefix) - 1) == 0;
+    }
+
     /** git wants forward slashes in pathspecs on every platform. */
     static FString NormalizeForGit(const FString& RepoRelativePath)
     {
@@ -40,6 +47,18 @@ bool FGraphXPortGitBlob::ExtractBlobToFile(const FString& RepoRoot, const FStrin
     if (!FGraphXPortGitProcess::Run(Args, RepoRoot, Blob, ReturnCode) || ReturnCode != 0 || Blob.Num() == 0)
     {
         return false;
+    }
+
+    if (IsLfsPointer(Blob))
+    {
+        TArray<uint8> Content;
+        const FString SmudgeArgs = FString::Printf(TEXT("lfs smudge \"%s\""), *NormalizeForGit(RepoRelativePath));
+        if (!FGraphXPortGitProcess::Run(SmudgeArgs, RepoRoot, Content, ReturnCode, &Blob)
+            || ReturnCode != 0 || Content.IsEmpty() || IsLfsPointer(Content))
+        {
+            return false;
+        }
+        Blob = MoveTemp(Content);
     }
 
     IFileManager::Get().MakeDirectory(*FPaths::GetPath(DestFilePath), /*Tree=*/true);

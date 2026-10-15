@@ -162,6 +162,7 @@ private:
     void LoadRealSide(FSideData& Side, bool bEditable);
     void CollectGraphNames();
     void ComputeAllDiffs();
+    static void RemoveRevisionClassPinDefaults(TArray<FDiffSingleResult>& Diffs, const FSideData& OldSide, const FSideData& NewSide);
     void AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendDefaultsDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
     void AppendClassSettingsDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const;
@@ -179,6 +180,7 @@ private:
     void PartitionRowsIntoTree(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& AllRows);
     void ApplySelectedGraphDiffResults();
     void RebuildPanes();
+    void UpdateViewLock();
 
     /**
      * The side holding "my" changes for comparison purposes. In a conflict that is the
@@ -256,6 +258,7 @@ private:
     FName InspectedMemberName;
     FPropertySoftPath InspectedProperty;
     bool bVerticalPanes = false;
+    bool bSyncViews = true;
     /** Object shown in the member view's details panel: a component, or the class defaults. */
     FName InspectedComponentName;
     TMap<FName, FGraphDiffSet> GraphDiffs;

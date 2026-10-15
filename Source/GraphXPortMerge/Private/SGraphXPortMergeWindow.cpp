@@ -1,7 +1,15 @@
 #include "SGraphXPortMergeWindow.h"
 
 #include "SGraphXPortDiffPanel.h"
+#include "GraphXPortTempPackage.h"
+#include "Editor.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
+#include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
+#include "Misc/MessageDialog.h"
+#include "Misc/Paths.h"
 #include "Styling/AppStyle.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SSearchBox.h"
 #include "Widgets/Layout/SBorder.h"
@@ -146,6 +154,7 @@ TSharedRef<SWidget> SGraphXPortMergeWindow::BuildFileListPanel()
             .OnGenerateRow(this, &SGraphXPortMergeWindow::GenerateFileRow)
             .OnGetChildren(this, &SGraphXPortMergeWindow::OnGetFileChildren)
             .OnSelectionChanged(this, &SGraphXPortMergeWindow::OnFileSelectionChanged)
+            .OnContextMenuOpening(this, &SGraphXPortMergeWindow::BuildFileContextMenu)
             .OnMouseButtonClick_Lambda([this](FGraphXPortFileListItemPtr Item)
             {
                 // A click on a commit opens it to show its assets. Handled per click rather
@@ -157,6 +166,53 @@ TSharedRef<SWidget> SGraphXPortMergeWindow::BuildFileListPanel()
             })
             .SelectionMode(ESelectionMode::Single)
         ];
+}
+
+TSharedPtr<SWidget> SGraphXPortMergeWindow::BuildFileContextMenu()
+{
+    if (!FileTreeView.IsValid()) return nullptr;
+    const TArray<FGraphXPortFileListItemPtr> Selection = FileTreeView->GetSelectedItems();
+    if (Selection.Num() != 1 || !Selection[0].IsValid() || !Selection[0]->File.IsValid()) return nullptr;
+
+    const FGraphXPortGitFileEntryPtr Entry = Selection[0]->File;
+    const FString FilePath = FPaths::ConvertRelativePathToFull(RepoRoot / Entry->RepoRelativePath);
+    if (!FPaths::IsUnderDirectory(FilePath, RepoRoot)) return nullptr;
+
+    const FCanExecuteAction FileExists = FCanExecuteAction::CreateLambda([FilePath]()
+    {
+        return IFileManager::Get().FileExists(*FilePath);
+    });
+    FMenuBuilder Menu(true, nullptr);
+    Menu.AddMenuEntry(LOCTEXT("ShowInContentBrowser", "Show in Content Browser"),
+        LOCTEXT("ShowInContentBrowserTip", "Locate the current working-tree asset in the Content Browser."),
+        FSlateIcon(), FUIAction(FExecuteAction::CreateSP(this, &SGraphXPortMergeWindow::OpenWorkingAsset, Entry, true), FileExists));
+    Menu.AddMenuEntry(LOCTEXT("ShowInExplorer", "Show in Explorer"),
+        LOCTEXT("ShowInExplorerTip", "Locate the current working-tree file on disk."),
+        FSlateIcon(), FUIAction(FExecuteAction::CreateLambda([FilePath]() { FPlatformProcess::ExploreFolder(*FilePath); }), FileExists));
+    Menu.AddMenuEntry(LOCTEXT("OpenOriginalAsset", "Open Original Asset"),
+        LOCTEXT("OpenOriginalAssetTip", "Open the current working-tree asset in its Unreal Editor."),
+        FSlateIcon(), FUIAction(FExecuteAction::CreateSP(this, &SGraphXPortMergeWindow::OpenWorkingAsset, Entry, false), FileExists));
+    return Menu.MakeWidget();
+}
+
+void SGraphXPortMergeWindow::OpenWorkingAsset(FGraphXPortGitFileEntryPtr Entry, bool bShowInBrowser)
+{
+    FGraphXPortLoadedAsset Loaded;
+    FString Error;
+    if (!FGraphXPortTempPackage::ResolveRealAsset(RepoRoot, Entry->RepoRelativePath, Loaded, Error))
+    {
+        FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(Error));
+        return;
+    }
+
+    if (bShowInBrowser)
+    {
+        GEditor->SyncBrowserToObjects(TArray<UObject*>{ Loaded.Asset });
+    }
+    else
+    {
+        GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OpenEditorForAsset(Loaded.Asset);
+    }
 }
 
 void SGraphXPortMergeWindow::RefreshFileList()

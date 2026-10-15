@@ -2,6 +2,7 @@
 
 #include "DiffUtils.h"
 #include "EdGraph/EdGraph.h"
+#include "EdGraph/EdGraphPin.h"
 #include "EdGraphUtilities.h"
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"
@@ -30,6 +31,7 @@
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 #include "Widgets/Input/SButton.h"
+#include "Widgets/Input/SCheckBox.h"
 #include "Widgets/Layout/SBox.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SGridPanel.h"
@@ -559,14 +561,17 @@ void SGraphXPortDiffPanel::ComputeAllDiffs()
         if (BaseGraph && MineGraph)
         {
             FGraphDiffControl::DiffGraphs(BaseGraph, MineGraph, *Set.MineDiffs);
+            RemoveRevisionClassPinDefaults(*Set.MineDiffs, BaseSide, MineSide);
         }
         if (BaseGraph && TheirsGraph)
         {
             FGraphDiffControl::DiffGraphs(BaseGraph, TheirsGraph, *Set.TheirsDiffs);
+            RemoveRevisionClassPinDefaults(*Set.TheirsDiffs, BaseSide, TheirsSide);
         }
         if (BaseGraph && ResultGraph)
         {
             FGraphDiffControl::DiffGraphs(BaseGraph, ResultGraph, *Set.ResultDiffs);
+            RemoveRevisionClassPinDefaults(*Set.ResultDiffs, BaseSide, ResultSide);
         }
         // The base pane marks anything either side touched.
         if (Mode == EGraphXPortDiffMode::Conflict3Way)
@@ -582,6 +587,23 @@ void SGraphXPortDiffPanel::ComputeAllDiffs()
 
         GraphDiffs.Add(GraphName, Set);
     }
+}
+
+void SGraphXPortDiffPanel::RemoveRevisionClassPinDefaults(TArray<FDiffSingleResult>& Diffs, const FSideData& OldSide, const FSideData& NewSide)
+{
+    if (!OldSide.Package || !NewSide.Package || (!OldSide.bIsTemp && !NewSide.bIsTemp)) return;
+
+    Diffs.RemoveAll([&](const FDiffSingleResult& Diff)
+    {
+        const UObject* OldDefault = Diff.Pin1 ? Diff.Pin1->DefaultObject.Get() : nullptr;
+        const UObject* NewDefault = Diff.Pin2 ? Diff.Pin2->DefaultObject.Get() : nullptr;
+        // Historical revisions give the same Blueprint class different temporary package paths.
+        return Diff.Diff == EDiffType::PIN_DEFAULT_VALUE && OldDefault && NewDefault
+            && OldDefault->IsA<UClass>() && NewDefault->IsA<UClass>()
+            && OldDefault->GetOutermost() == OldSide.Package
+            && NewDefault->GetOutermost() == NewSide.Package
+            && OldDefault->GetName() == NewDefault->GetName();
+    });
 }
 
 void SGraphXPortDiffPanel::AppendVariableDiffs(TArray<TSharedPtr<FGraphXPortDiffTreeNode>>& OutRows) const
@@ -971,6 +993,18 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildToolbarRow()
         [
             SNew(SButton).Text(LOCTEXT("PaneOrientation", "Vertical / Horizontal"))
             .OnClicked(this, &SGraphXPortDiffPanel::ToggleOrientation)
+        ]
+        + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(8.f, 2.f)
+        [
+            SNew(SCheckBox)
+            .IsChecked_Lambda([this] { return bSyncViews ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+            .OnCheckStateChanged_Lambda([this](ECheckBoxState State)
+            {
+                bSyncViews = State == ECheckBoxState::Checked;
+                UpdateViewLock();
+            })
+            .ToolTipText(LOCTEXT("SyncViewsTip", "Pan and zoom graph panes together. Uncheck to move each pane separately."))
+            [ SNew(STextBlock).Text(LOCTEXT("SyncViews", "Sync Views")) ]
         ]
         + SHorizontalBox::Slot()
         .AutoWidth()
@@ -1628,6 +1662,30 @@ void SGraphXPortDiffPanel::RebuildPanes()
     }
 
     PanesContainer->SetContent(Splitter);
+    UpdateViewLock();
+}
+
+void SGraphXPortDiffPanel::UpdateViewLock()
+{
+    const TSharedPtr<SGraphEditor> Panes[] = { LeftPane, ResultPane, TheirsPane };
+    for (int32 Index = 0; Index < UE_ARRAY_COUNT(Panes); ++Index)
+    {
+        if (!Panes[Index].IsValid()) continue;
+        for (int32 OtherIndex = Index + 1; OtherIndex < UE_ARRAY_COUNT(Panes); ++OtherIndex)
+        {
+            if (!Panes[OtherIndex].IsValid()) continue;
+            if (bSyncViews)
+            {
+                Panes[Index]->LockToGraphEditor(Panes[OtherIndex]);
+                Panes[OtherIndex]->LockToGraphEditor(Panes[Index]);
+            }
+            else
+            {
+                Panes[Index]->UnlockFromGraphEditor(Panes[OtherIndex]);
+                Panes[OtherIndex]->UnlockFromGraphEditor(Panes[Index]);
+            }
+        }
+    }
 }
 
 bool SGraphXPortDiffPanel::CompileMine()
