@@ -13,6 +13,7 @@
 #include "GraphDiffControl.h"
 #include "GraphEditor.h"
 #include "GraphXPortGitBlob.h"
+#include "GraphXPortGitProcess.h"
 #include "GraphXPortTempPackage.h"
 #include "HAL/PlatformApplicationMisc.h"
 #include "IDetailsView.h"
@@ -28,6 +29,12 @@
 #include "PropertyEditorModule.h"
 #include "ScopedTransaction.h"
 #include "Styling/AppStyle.h"
+#include "Brushes/SlateDynamicImageBrush.h"
+#include "Engine/Texture.h"
+#include "Styling/SlateIconFinder.h"
+#include "Widgets/Images/SImage.h"
+#include "Widgets/Layout/SScaleBox.h"
+#include "Widgets/Views/SListView.h"
 #include "UObject/Package.h"
 #include "UObject/SavePackage.h"
 #include "Widgets/Input/SButton.h"
@@ -117,6 +124,16 @@ void SGraphXPortDiffPanel::AddReferencedObjects(FReferenceCollector& Collector)
 
 void SGraphXPortDiffPanel::SetFile(const FString& InRepoRoot, TSharedPtr<FGraphXPortGitFileEntry> InEntry)
 {
+    // Anything that is not a package is shown as a plain text diff: reset the asset
+    // state as for "no selection", then put the diff where the graph panes would be.
+    if (InEntry.IsValid() && !FPackageName::IsPackageExtension(*FPaths::GetExtension(InEntry->RepoRelativePath)))
+    {
+        SetFile(InRepoRoot, nullptr);
+        RepoRoot = InRepoRoot;
+        PanesContainer->SetContent(BuildTextDiffWidget(*InEntry));
+        return;
+    }
+
     ReleaseLoadedRevisions();
 
     RepoRoot = InRepoRoot;
@@ -140,6 +157,182 @@ void SGraphXPortDiffPanel::SetFile(const FString& InRepoRoot, TSharedPtr<FGraphX
     {
         StatusText->SetText(FText::GetEmpty());
     }
+}
+
+TSharedRef<SWidget> SGraphXPortDiffPanel::BuildTextDiffWidget(const FGraphXPortGitFileEntry& TextEntry)
+{
+    const FString Paths = TextEntry.OriginalPath.IsEmpty()
+        ? FString::Printf(TEXT("\"%s\""), *TextEntry.RepoRelativePath)
+        : FString::Printf(TEXT("\"%s\" \"%s\""), *TextEntry.OriginalPath, *TextEntry.RepoRelativePath);
+    // Full context, so the one hunk is the whole file and both sides can be rebuilt from it.
+    const FString Git = TEXT("-c core.quotePath=false --no-pager ");
+    const FString Diff = TEXT("diff --no-color --no-ext-diff -U999999 -M ");
+
+    FString Args;
+    FText LeftLabel = LOCTEXT("TextHead", "HEAD");
+    FText RightLabel = LOCTEXT("TextWorking", "Working tree");
+    switch (TextEntry.Source)
+    {
+    case EGraphXPortChangeSource::Staged:
+        Args = Git + Diff + TEXT("--cached -- ") + Paths;
+        RightLabel = LOCTEXT("TextStaged", "Staged (index)");
+        break;
+    case EGraphXPortChangeSource::Commit:
+        Args = Git + Diff + FString::Printf(TEXT("%s^ %s -- "), *TextEntry.CommitHash, *TextEntry.CommitHash) + Paths;
+        LeftLabel = FText::Format(LOCTEXT("TextParent", "Parent of {0}"), FText::FromString(TextEntry.CommitHash.Left(7)));
+        RightLabel = FText::FromString(TextEntry.CommitHash.Left(7));
+        break;
+    default:
+        if (TextEntry.StatusCode == TEXT('?'))
+        {
+            // Untracked files have nothing in git to diff against.
+            Args = Git + Diff + TEXT("--no-index -- /dev/null ") + Paths;
+        }
+        else if (TextEntry.bConflicted)
+        {
+            // --ours keeps the output a plain two-sided diff instead of a combined one.
+            Args = Git + Diff + TEXT("--ours -- ") + Paths;
+            LeftLabel = LOCTEXT("TextOurs", "Mine (ours)");
+        }
+        else
+        {
+            Args = Git + Diff + TEXT("-- ") + Paths;
+        }
+        break;
+    }
+
+    FString Output;
+    int32 ReturnCode = -1;
+    FGraphXPortGitProcess::RunText(Args, RepoRoot, Output, ReturnCode);
+    if (Output.IsEmpty() && TextEntry.Source == EGraphXPortChangeSource::Commit)
+    {
+        // A root commit has no parent to diff against.
+        FGraphXPortGitProcess::RunText(Git + TEXT("show --no-color --no-ext-diff -U999999 --format= ") + TextEntry.CommitHash + TEXT(" -- ") + Paths, RepoRoot, Output, ReturnCode);
+    }
+
+    TArray<FString> Lines;
+    Output.ParseIntoArrayLines(Lines, /*bCullEmpty=*/false);
+
+    TextDiffRows.Reset();
+    TArray<FString> Removed;
+    TArray<FString> Added;
+    int32 LeftLine = 1;
+    int32 RightLine = 1;
+    // A run of removals followed by additions is a modification: pair them up row by row.
+    auto Flush = [&]()
+    {
+        for (int32 i = 0; i < FMath::Max(Removed.Num(), Added.Num()); ++i)
+        {
+            TSharedPtr<FTextDiffRow> Row = MakeShared<FTextDiffRow>();
+            Row->bChanged = true;
+            if (Removed.IsValidIndex(i)) { Row->LeftLine = LeftLine++; Row->Left = Removed[i]; }
+            if (Added.IsValidIndex(i)) { Row->RightLine = RightLine++; Row->Right = Added[i]; }
+            TextDiffRows.Add(Row);
+        }
+        Removed.Reset();
+        Added.Reset();
+    };
+
+    bool bInHunk = false;
+    for (const FString& Line : Lines)
+    {
+        if (!bInHunk)
+        {
+            bInHunk = Line.StartsWith(TEXT("@@"));
+            continue;
+        }
+        if (Line.StartsWith(TEXT("\\")))
+        {
+            continue; // "\ No newline at end of file"
+        }
+        const FString Text = Line.Mid(1).Replace(TEXT("\t"), TEXT("    "));
+        if (Line.StartsWith(TEXT("-")))
+        {
+            Removed.Add(Text);
+        }
+        else if (Line.StartsWith(TEXT("+")))
+        {
+            Added.Add(Text);
+        }
+        else
+        {
+            Flush();
+            TSharedPtr<FTextDiffRow> Row = MakeShared<FTextDiffRow>();
+            Row->LeftLine = LeftLine++;
+            Row->RightLine = RightLine++;
+            Row->Left = Text;
+            Row->Right = Text;
+            TextDiffRows.Add(Row);
+        }
+    }
+    Flush();
+
+    if (TextDiffRows.IsEmpty())
+    {
+        return SNew(SBox).HAlign(HAlign_Center).VAlign(VAlign_Center)
+            [
+                SNew(STextBlock).Text(LOCTEXT("NoTextDiff", "No textual differences (binary file, or only mode changed)."))
+            ];
+    }
+
+    const FSlateFontInfo Mono = FCoreStyle::GetDefaultFontStyle("Mono", 9);
+    auto MakeHalf = [Mono](int32 LineNumber, const FString& Text, const FLinearColor& Background)
+    {
+        return SNew(SBorder)
+            .BorderImage(FAppStyle::GetBrush("WhiteBrush"))
+            .BorderBackgroundColor(Background)
+            .Padding(FMargin(0.f, 0.f))
+            [
+                SNew(SHorizontalBox)
+                + SHorizontalBox::Slot().AutoWidth()
+                [
+                    SNew(SBox).WidthOverride(48.f)
+                    [
+                        SNew(STextBlock)
+                        .Text(LineNumber > 0 ? FText::AsNumber(LineNumber, &FNumberFormattingOptions::DefaultNoGrouping()) : FText::GetEmpty())
+                        .Font(Mono)
+                        .ColorAndOpacity(FLinearColor(0.45f, 0.45f, 0.45f))
+                        .Justification(ETextJustify::Right)
+                    ]
+                ]
+                + SHorizontalBox::Slot().FillWidth(1.f).Padding(8.f, 0.f, 0.f, 0.f)
+                [
+                    SNew(STextBlock).Text(FText::FromString(Text)).Font(Mono)
+                ]
+            ];
+    };
+
+    return SNew(SVerticalBox)
+        + SVerticalBox::Slot().AutoHeight().Padding(4.f)
+        [
+            SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().FillWidth(1.f) [ SNew(STextBlock).Text(LeftLabel).Font(FAppStyle::GetFontStyle("BoldFont")) ]
+            + SHorizontalBox::Slot().FillWidth(1.f) [ SNew(STextBlock).Text(RightLabel).Font(FAppStyle::GetFontStyle("BoldFont")) ]
+        ]
+        + SVerticalBox::Slot().FillHeight(1.f)
+        [
+            // One list for both sides, so they always scroll together.
+            SNew(SListView<TSharedPtr<FTextDiffRow>>)
+            .ListItemsSource(&TextDiffRows)
+            .SelectionMode(ESelectionMode::None)
+            .OnGenerateRow_Lambda([MakeHalf](TSharedPtr<FTextDiffRow> Row, const TSharedRef<STableViewBase>& Owner)
+            {
+                const FLinearColor None(0.f, 0.f, 0.f, 0.f);
+                // Linear values: 0.12 renders as a mid grey, so the padding needs to be near black.
+                const FLinearColor Hatch(0.006f, 0.006f, 0.006f, 1.f);
+                const FLinearColor Removed(0.45f, 0.08f, 0.08f, 0.6f);
+                const FLinearColor Added(0.12f, 0.4f, 0.12f, 0.6f);
+                const FLinearColor LeftBg = !Row->bChanged ? None : Row->LeftLine > 0 ? Removed : Hatch;
+                const FLinearColor RightBg = !Row->bChanged ? None : Row->RightLine > 0 ? Added : Hatch;
+                return SNew(STableRow<TSharedPtr<FTextDiffRow>>, Owner)
+                    [
+                        SNew(SHorizontalBox)
+                        + SHorizontalBox::Slot().FillWidth(1.f) [ MakeHalf(Row->LeftLine, Row->Left, LeftBg) ]
+                        + SHorizontalBox::Slot().AutoWidth() [ SNew(SBox).WidthOverride(6.f) ]
+                        + SHorizontalBox::Slot().FillWidth(1.f) [ MakeHalf(Row->RightLine, Row->Right, RightBg) ]
+                    ];
+            })
+        ];
 }
 
 void SGraphXPortDiffPanel::RefreshResultOrigin()
@@ -1395,6 +1588,25 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildEntryListWidget(const FSideData& 
                 CellColor = ChangedColor;
             }
 
+            if (ColumnIndex == 0 && AssetEntry.IconClass)
+            {
+                Grid->AddSlot(ColumnIndex + 1, Row)
+                [
+                    SNew(SHorizontalBox)
+                    + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(6.f, 0.f, 0.f, 0.f)
+                    [
+                        SNew(SImage)
+                        .Image(FSlateIconFinder::FindIconForClass(AssetEntry.IconClass).GetIcon())
+                        .DesiredSizeOverride(FVector2D(16.f, 16.f))
+                    ]
+                    + SHorizontalBox::Slot().AutoWidth()
+                    [
+                        MakeCell(AssetEntry.Cells[ColumnIndex], CellColor, /*bHeader=*/false)
+                    ]
+                ];
+                continue;
+            }
+
             Grid->AddSlot(ColumnIndex + 1, Row)
             [
                 MakeCell(AssetEntry.Cells[ColumnIndex], CellColor, /*bHeader=*/false)
@@ -1440,9 +1652,56 @@ TSharedRef<SWidget> SGraphXPortDiffPanel::BuildSideWidget(FSideData& Side, TShar
             ]
         ];
 
-    // Entry-based assets have no graphs; they are always shown as their entry list.
-    if (FGraphXPortAssetDiff::IsEntryBased(Side.Kind) && Side.Asset)
+    // Entry-based assets have no graphs; they are always shown as their entry list. A
+    // Widget Blueprint shows its designer tree the same way.
+    const bool bShowEntries = FGraphXPortAssetDiff::IsEntryBased(Side.Kind)
+        || (CurrentView == EGraphXPortView::Entries && !Side.Entries.IsEmpty());
+    if (bShowEntries && Side.Asset)
     {
+        if (!Side.Thumbnail.IsValid())
+        {
+            if (UTexture* Texture = Cast<UTexture>(Side.Asset))
+            {
+                TSharedRef<FSlateBrush> Brush = MakeShared<FSlateBrush>();
+                Brush->SetResourceObject(Texture);
+                Brush->ImageSize = FVector2D(FMath::Max(1, (int32)Texture->Source.GetSizeX()), FMath::Max(1, (int32)Texture->Source.GetSizeY()));
+                Side.Thumbnail = Brush;
+            }
+            else if (Side.Kind == EGraphXPortAssetKind::Material || Side.Kind == EGraphXPortAssetKind::MaterialInstance
+                || Side.Kind == EGraphXPortAssetKind::Properties)
+            {
+                // The same still the Content Browser shows: a lit sphere for materials, the mesh for meshes.
+                TArray<uint8> Pixels;
+                int32 Width = 0;
+                int32 Height = 0;
+                if (FGraphXPortAssetDiff::RenderThumbnail(Side.Asset, Side.bIsTemp, Pixels, Width, Height))
+                {
+                    Side.Thumbnail = FSlateDynamicImageBrush::CreateWithImageData(
+                        *FString::Printf(TEXT("GraphXPortThumb_%s"), *FGuid::NewGuid().ToString()),
+                        FVector2D(Width, Height), Pixels);
+                }
+            }
+        }
+
+        if (const TSharedPtr<FSlateBrush> Brush = Side.Thumbnail)
+        {
+            Container->AddSlot()
+            .AutoHeight()
+            .Padding(4.f)
+            [
+                SNew(SBox)
+                .HeightOverride(256.f)
+                [
+                    SNew(SScaleBox)
+                    .Stretch(EStretch::ScaleToFit)
+                    [
+                        // The lambda keeps the brush alive for as long as the image is.
+                        SNew(SImage).Image_Lambda([Brush]() { return Brush.Get(); })
+                    ]
+                ]
+            ];
+        }
+
         Container->AddSlot()
         .FillHeight(1.f)
         [

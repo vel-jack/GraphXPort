@@ -45,14 +45,11 @@ namespace GraphXPortTempPackagePrivate
                 return false;
             }
 
-            if (Candidate == nullptr)
+            const EGraphXPortAssetKind Kind = FGraphXPortAssetDiff::DetectKind(Object);
+            if (FGraphXPortAssetDiff::KindPriority(Kind) > FGraphXPortAssetDiff::KindPriority(CandidateKind))
             {
-                const EGraphXPortAssetKind Kind = FGraphXPortAssetDiff::DetectKind(Object);
-                if (Kind != EGraphXPortAssetKind::None && Kind != EGraphXPortAssetKind::Unsupported)
-                {
-                    Candidate = Object;
-                    CandidateKind = Kind;
-                }
+                Candidate = Object;
+                CandidateKind = Kind;
             }
 
             return true;

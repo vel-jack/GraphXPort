@@ -34,7 +34,7 @@ bool FGraphXPortGitHistory::ListCommits(const FString& RepoRoot, int32 Skip, int
         TEXT("\"--format=%%x1e%%H%%x1f%%h%%x1f%%an%%x1f%%ad%%x1f%%s%%x1f%%b%%x1f\" ")
         TEXT("--skip=%d -n %d"),
         FMath::Max(0, Skip), FMath::Max(1, Count));
-    const FString PathSpecs = TEXT("-- \"*.uasset\" \"*.umap\"");
+    const FString PathSpecs = TEXT("--");
 
     FString LogOut;
     int32 ReturnCode = -1;

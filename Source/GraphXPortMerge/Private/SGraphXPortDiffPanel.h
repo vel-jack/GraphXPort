@@ -133,6 +133,8 @@ private:
         EGraphXPortAssetKind Kind = EGraphXPortAssetKind::None;
         bool bEditable = false;
         bool bIsTemp = false;
+        /** Rendered once per revision: the asset's thumbnail (material sphere, mesh, ...). */
+        TSharedPtr<FSlateBrush> Thumbnail;
         FString UnavailableReason;
         TSharedPtr<TArray<FDiffSingleResult>> DiffResults;
         /** Populated for entry-based kinds (enum, struct, data table). */
@@ -288,6 +290,20 @@ private:
     bool bJumpTimerRegistered = false;
 
     TSharedPtr<SBox> PanesContainer;
+
+    /** One aligned row of the side-by-side text view. Line number 0 = padding. */
+    struct FTextDiffRow
+    {
+        int32 LeftLine = 0;
+        int32 RightLine = 0;
+        FString Left;
+        FString Right;
+        bool bChanged = false;
+    };
+
+    /** Non-package files: read-only side-by-side view built from a full-context `git diff`. */
+    TSharedRef<SWidget> BuildTextDiffWidget(const FGraphXPortGitFileEntry& TextEntry);
+    TArray<TSharedPtr<FTextDiffRow>> TextDiffRows;
     TSharedPtr<STextBlock> StatusText;
     FSimpleDelegate OnFileResolved;
 };

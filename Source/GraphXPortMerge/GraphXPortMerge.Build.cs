@@ -22,9 +22,12 @@ public class GraphXPortMerge : ModuleRules
             "Kismet",
             "Projects",
             "PropertyEditor",
+            "RHI",
             "Slate",
             "SlateCore",
             "ToolMenus",
+            "UMG",
+            "UMGEditor",
             "UnrealEd",
             "WorkspaceMenuStructure"
         });

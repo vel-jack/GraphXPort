@@ -82,6 +82,15 @@ void SGraphXPortDiffPanel::BuildDiffTree()
     Components->Icon = "Kismet.Tabs.Components";
     AppendComponentDiffs(Components->Children);
 
+    // Widget Blueprints carry their designer tree as entries, levels their actors.
+    if (!BaseSide.Entries.IsEmpty() || !LocalChangeSide().Entries.IsEmpty() || !TheirsSide.Entries.IsEmpty())
+    {
+        const EGraphXPortAssetKind Kind = ResultSide.Asset ? ResultSide.Kind : BaseSide.Kind;
+        auto EntriesRoot = Section(FGraphXPortAssetDiff::DescribeEntries(Kind), EGraphXPortView::Entries);
+        EntriesRoot->Icon = Kind == EGraphXPortAssetKind::LevelScript ? FName("LevelEditor.Tabs.Outliner") : FName("Kismet.Tabs.Palette");
+        AppendEntryDiffs(EntriesRoot->Children);
+    }
+
     // Construction Script and Event Graph first, then other functions/macros/collapsed graphs.
     TArray<FName> OrderedGraphs = GraphNames;
     OrderedGraphs.Sort([](FName A, FName B)
