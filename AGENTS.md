@@ -24,10 +24,11 @@ Users access GraphXPort directly from Blueprint Editor context menus.
 
 ## Modules
 
-The plugin ships two editor modules:
+The plugin ships three editor modules:
 
 - `GraphXPort` - export, formatting, and Beautify. Has no git dependency and works
   entirely offline, as described below.
+- `GraphXPortConflictToolset` - Epic MCP conflict workflows; depends on ToolsetRegistry and UnrealMCP in UE 5.8.
 - `GraphXPortMerge` - the **GraphXPort Merge** window: git status, side-by-side
   asset revision comparison, and manual conflict resolution. It shells out to
   `git`, which is the one place the plugin invokes an external process.
@@ -157,6 +158,10 @@ editors, graphs, selections, clipboard access, or file writes.
 
 ## Safety
 
+### Agent workflow for requested Blueprint conflicts
+
+Use GraphXPort's base/current/incoming evidence to review both sides, then official/custom Unreal MCP tools to integrate the intended changes. Never take incoming or outgoing/current wholesale or invoke Start from Incoming/Mine without explicit user confirmation for that asset and side; a general conflict-resolution request does not authorize discarding either side. Preserve existing unsaved work and user-confirmed contracts. Check relevant variables, interfaces, components and defaults as well as graphs. Search the shared MCP tool index and both live catalogs before declaring a tool unavailable. Verify edited nodes/links/layout, compile the target, save, and verify clean package state before staging only the reviewed asset and confirming no unmerged Git stages remain. Do not claim runtime verification from compilation, and do not commit unless requested. Host-project restrictions on Blueprint access and computer use still apply.
+
 Export operations must not modify Blueprint assets, compile Blueprints, save
 packages, or run PIE.
 
@@ -245,6 +250,14 @@ It must stay within these bounds:
   no Save button, no paste, nothing written. Staging, unstaging, and anything else
   that changes the index stays in the user's git tool.
 
+The bundled `GraphXPortConflictToolset` module may expose explicit
+preview/apply/save/stage workflows. Its mutations delegate to UnrealMCP's transactional
+patch engine; GraphXPort does not depend on that integration. Staging through the
+exported reader service is only requested after successful compile/save, unchanged
+Git-stage identities, a clean package and a matching saved-file hash. Read-only revision
+loads may be cached by blob identity with bounded retention; never force-unload them
+or purge files held by the merge window.
+
 Future import or merge operations must be:
 
 - previewable before mutation
@@ -330,7 +343,7 @@ copied output.
 - Keep files focused; split source files that become difficult to review.
 - Add comments only where editor API behavior or graph semantics are not clear.
 - Keep user-visible strings concise and actionable.
-- Do not add dependencies on UnrealMCP modules.
+- Keep UnrealMCP dependencies confined to GraphXPortConflictToolset.
 
 ## Verification
 
